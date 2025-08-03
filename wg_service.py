@@ -295,7 +295,18 @@ def run_periodic_reporter():
     print("Starting periodic status reporter...")
     while True:
         send_status_update()
-        time.sleep(5 * 60)  # 300 seconds
+        time.sleep(60)
+
+# ---------------------------------------------------------------------------
+# APP LIFECYCLE
+# ---------------------------------------------------------------------------
+
+@app.on_event("startup")
+def on_startup():
+    """Starts the periodic status reporter in a background thread."""
+    reporter_thread = threading.Thread(target=run_periodic_reporter, daemon=True)
+    reporter_thread.start()
+
 
 # ---------------------------------------------------------------------------
 # LOCAL DEV ENTRYPOINT
@@ -304,8 +315,5 @@ def run_periodic_reporter():
 if __name__ == "__main__":
     import uvicorn
 
-    # Start the background thread for status reporting
-    reporter_thread = threading.Thread(target=run_periodic_reporter, daemon=True)
-    reporter_thread.start()
-
+    # The on_startup event now handles the background thread.
     uvicorn.run("wg_service:app", host="0.0.0.0", port=LISTEN_PORT, reload=True)
