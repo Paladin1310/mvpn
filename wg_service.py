@@ -282,8 +282,8 @@ def send_status_update():
     }
 
     try:
-        print("Sending status update to api.mvpn.space...")
-        response = requests.post("https://api.mvpn.space/status", json=payload, timeout=30)
+        print("Sending status update to mvpn.space...")
+        response = requests.post("https://mvpn.space/status", json=payload, timeout=30)
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
         print(f"Status update sent successfully (HTTP {response.status_code}).")
     except requests.exceptions.RequestException as e:
