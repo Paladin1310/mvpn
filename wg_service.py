@@ -1,170 +1,311 @@
-#!/usr/bin/env bash
-# install_wg_service.sh — быстрый деплой /opt/wg_service.py + wg0 + MySQL на Ubuntu 24.04
+"""WireGuard Profile Management API — no accounts, one API key
+===========================================================
+Minimal FastAPI service that automates creation / listing / deletion of
+WireGuard peers while persisting data in MySQL. **No per‑user accounts or
+quotas** — a single shared `API_TOKEN` protects every endpoint.
 
-set -euo pipefail
+Key flow (matches the original PHP description minus auth):
+----------------------------------------------------------------
+1. **POST /profiles** – generates key pair, picks next IP, attaches the peer via
+   `wg set`, appends a `[Peer]` block to `/etc/wireguard/wg0.conf`, stores data
+   in `wireguard_profiles`, and returns JSON with profile metadata.
+2. **GET /profiles** – returns the list of every existing profile.
+3. **GET /profiles/{id}/config** – produces a ready `.conf` file for the client.
+4. **DELETE /profiles/{id}** – removes the peer from interface + DB.
+"""
+from __future__ import annotations
 
-# ------------------------------------------------------------------
-# 1. Проверки и переменные
-# ------------------------------------------------------------------
-if [[ $EUID -ne 0 ]]; then
-  echo "Пожалуйста, запускайте скрипт от root." >&2
-  exit 1
-fi
+import datetime
+import ipaddress
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import List
 
-WG_SERVICE_FILE="/opt/wg_service.py"
-if [[ ! -f "$WG_SERVICE_FILE" ]]; then
-  echo "Файл $WG_SERVICE_FILE не найден. Скопируйте его перед запуском." >&2
-  exit 1
-fi
+import mysql.connector  # pip install mysql-connector-python
+import requests  # pip install requests
+from fastapi import FastAPI, HTTPException, Query, Response, Path as FPath
+from pydantic import BaseModel
 
-PUBLIC_IP="${1:-}"
-if [[ -z "$PUBLIC_IP" ]]; then
-  PUBLIC_IP=$(curl -s https://api.ipify.org || true)
-  [[ -z "$PUBLIC_IP" ]] && {
-    echo "Укажите внешний IP: ./install_wg_service.sh <PUBLIC_IP>" >&2
-    exit 1
-  }
-fi
+# ---------------------------------------------------------------------------
+# ENVIRONMENT CONFIGURATION (adjust in /etc/systemd/system/…)
+# ---------------------------------------------------------------------------
 
-# WireGuard — серверные параметры
-SERVER_WG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
-SERVER_LISTEN_PORT="51820"
+API_TOKEN: str = os.getenv("API_TOKEN", "ReplaceMe")
+MYSQL_HOST: str = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_DB: str = os.getenv("MYSQL_DB", "wg_panel")
+MYSQL_USER: str = os.getenv("MYSQL_USER", "wg_user")
+MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "wg_pass")
 
-# Генерируем секреты / переменные окружения
-API_TOKEN=$(openssl rand -hex 32)
-MYSQL_PASSWORD=$(openssl rand -hex 16)
-MYSQL_USER="wg_user"
-MYSQL_DB="wg_panel"
-WG_INTERFACE="wg0"
-API_PORT="8080"
-WORKERS=$(( $(nproc) * 2 ))
-VENV_DIR="/opt/wg_service_venv"
+WG_INTERFACE: str = os.getenv("WG_INTERFACE", "wg0")
+SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<server‑pubkey>")
+SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", "1.2.3.4")
+SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "51830"))
 
-# ------------------------------------------------------------------
-# 2. Системные зависимости
-# ------------------------------------------------------------------
-echo "==> Устанавливаю системные пакеты…"
-apt update -y
-apt install -y --no-install-recommends \
-  wireguard iproute2 python3-venv python3-pip mariadb-server curl
+VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "10.100.10.0/24")
+DNS_SERVERS: str = os.getenv("DNS_SERVERS", "8.8.8.8")
 
-# ------------------------------------------------------------------
-# 3. Настройка WireGuard (wg0)
-# ------------------------------------------------------------------
-echo "==> Настраиваю интерфейс WireGuard ${WG_INTERFACE}…"
-mkdir -p /etc/wireguard
-umask 077
-[[ -f /etc/wireguard/server_private.key ]] || wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
-SERVER_PRIV_KEY=$(cat /etc/wireguard/server_private.key)
-SERVER_PUB_KEY=$(cat /etc/wireguard/server_public.key)
+LISTEN_PORT: int = int(os.getenv("API_PORT", "8080"))
+WG_CONF_PATH: Path = Path("/etc/wireguard") / f"{WG_INTERFACE}.conf"
 
-cat >/etc/wireguard/${WG_INTERFACE}.conf <<EOF
-[Interface]
-Address = ${SERVER_WG_ADDR}
-ListenPort = ${SERVER_LISTEN_PORT}
-PrivateKey = ${SERVER_PRIV_KEY}
-SaveConfig = true
-EOF
-# NAT для всей VPN-подсети
-iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o ens3 -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o ens3 -j MASQUERADE
+try:
+    VPN_NETWORK = ipaddress.ip_network(VPN_NETWORK_STR)
+except ValueError as exc:
+    sys.exit(f"Invalid VPN_NETWORK: {exc}")
 
-# сохраняем (чтобы пережило перезагрузку)
-apt-get install -y iptables-persistent
-netfilter-persistent save
+# ---------------------------------------------------------------------------
+# DATABASE INITIALISATION (MySQL)
+# ---------------------------------------------------------------------------
 
-# Включаем форвардинг
-sysctl -w net.ipv4.ip_forward=1
-grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+db = mysql.connector.connect(
+    host=MYSQL_HOST,
+    user=MYSQL_USER,
+    password=MYSQL_PASS,
+    database=MYSQL_DB,
+    autocommit=True,
+)
 
-# Поднимаем интерфейс
-systemctl enable --now wg-quick@${WG_INTERFACE}
+with db.cursor() as cur:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wireguard_profiles (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            private_key TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            vpn_address VARCHAR(45) NOT NULL UNIQUE,
+            created_at DATETIME NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
 
-# ------------------------------------------------------------------
-# 4. MariaDB / MySQL
-# ------------------------------------------------------------------
-echo "==> Настраиваю MariaDB…"
-systemctl enable --now mariadb
-mysql -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -e "CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';"
-mysql -e "GRANT ALL PRIVILEGES ON \`${MYSQL_DB}\`.* TO '${MYSQL_USER}'@'localhost'; FLUSH PRIVILEGES;"
+# ---------------------------------------------------------------------------
+# FASTAPI APP
+# ---------------------------------------------------------------------------
 
-# ------------------------------------------------------------------
-# 5. Python-виртуальное окружение
-# ------------------------------------------------------------------
-echo "==> Создаю Python-venv…"
-python3 -m venv "$VENV_DIR"
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
-pip install fastapi "uvicorn[standard]" python-dotenv mysql-connector-python
-deactivate
+app = FastAPI(title="WireGuard API", version="3.0.0")
 
-# ------------------------------------------------------------------
-# 6. Env-файл для API
-# ------------------------------------------------------------------
-cat >/etc/wg-service.env <<EOF
-API_TOKEN=${API_TOKEN}
-WG_INTERFACE=${WG_INTERFACE}
-API_PORT=${API_PORT}
+# ---------------------------------------------------------------------------
+# UTILS
+# ---------------------------------------------------------------------------
 
-# Сетевые данные сервера WG (для клиентских конфигов)
-SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
-SERVER_ENDPOINT_IP=${PUBLIC_IP}
-SERVER_ENDPOINT_PORT=${SERVER_LISTEN_PORT}
+def _require_token(token: str | None):
+    if token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
 
-# MySQL
-MYSQL_HOST=127.0.0.1
-MYSQL_DB=${MYSQL_DB}
-MYSQL_USER=${MYSQL_USER}
-MYSQL_PASSWORD=${MYSQL_PASSWORD}
-EOF
-chmod 600 /etc/wg-service.env
 
-# ------------------------------------------------------------------
-# 7. systemd-юнит
-# ------------------------------------------------------------------
-SERVICE_FILE=/etc/systemd/system/wg-service.service
-cat >"$SERVICE_FILE" <<EOF
-[Unit]
-Description=WireGuard Profile API (via virtualenv)
-After=network.target mariadb.service wg-quick@${WG_INTERFACE}.service
-Requires=wg-quick@${WG_INTERFACE}.service
+def _run(cmd: list[str], *, input_: str | None = None) -> str:
+    try:
+        res = subprocess.run(
+            cmd,
+            input=(input_.encode() if input_ else None),
+            capture_output=True,
+            check=True,
+        )
+        return res.stdout.decode().strip()
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500, detail=f"Command failed: {exc.stderr.decode().strip()}")
 
-[Service]
-Type=simple
-EnvironmentFile=/etc/wg-service.env
-# uvicorn запускает wg_service:app
-ExecStart=${VENV_DIR}/bin/uvicorn wg_service:app --host 0.0.0.0 --port \${API_PORT} --workers ${WORKERS}
-WorkingDirectory=/opt
-Restart=always
-RestartSec=5
 
-[Install]
-WantedBy=multi-user.target
-EOF
+def _generate_keys() -> tuple[str, str]:
+    priv = _run(["wg", "genkey"])
+    pub = _run(["wg", "pubkey"], input_=priv)
+    return priv, pub
 
-chmod 644 "$SERVICE_FILE"
-systemctl daemon-reload
-systemctl enable --now wg-service.service
 
-# ------------------------------------------------------------------
-# 8. Фаервол (UFW) — опционально
-# ------------------------------------------------------------------
-if command -v ufw >/dev/null; then
-  ufw allow ${SERVER_LISTEN_PORT}/udp || true
-fi
+def _next_ip() -> str:
+    """Return next unused /32 inside VPN_NETWORK."""
+    with db.cursor() as cur:
+        cur.execute("SELECT vpn_address FROM wireguard_profiles ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+    if row:
+        next_ip = ipaddress.ip_address(row[0]) + 1
+    else:
+        # Reserve .1 for the server – start with .2
+        next_ip = list(VPN_NETWORK.hosts())[1]
+    if next_ip not in VPN_NETWORK:
+        raise HTTPException(status_code=500, detail="Address pool exhausted")
+    return str(next_ip)
 
-# ------------------------------------------------------------------
-# 9. Итог
-# ------------------------------------------------------------------
-echo "------------------------------------------------------------"
-echo "✅  Установка завершена."
-echo "   WireGuard интерфейс: ${WG_INTERFACE} (${SERVER_WG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
-echo "   API слушает: http://${PUBLIC_IP}:${API_PORT}"
-echo "   Токен: ${API_TOKEN}"
-echo
-echo "   Пример запроса (создать профиль для user_id=1):"
-echo "     curl -X POST \"http://${PUBLIC_IP}:${API_PORT}/profiles?token=${API_TOKEN}&user_id=1\""
-echo
-echo "   Логи: journalctl -u wg-service -f"
-echo "------------------------------------------------------------"
+
+def _attach_peer(pubkey: str, ip_: str):
+    _run(["wg", "set", WG_INTERFACE, "peer", pubkey, "allowed-ips", f"{ip_}/32"])
+
+
+def _remove_peer(pubkey: str):
+    _run(["wg", "set", WG_INTERFACE, "peer", pubkey, "remove"])
+
+
+def _append_conf_block(pubkey: str, ip_: str):
+    WG_CONF_PATH.write_text(
+        WG_CONF_PATH.read_text() + f"\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {ip_}/32\n"
+    )
+
+# ---------------------------------------------------------------------------
+# Pydantic SCHEMA
+# ---------------------------------------------------------------------------
+
+class ProfileOut(BaseModel):
+    id: int
+    vpn_address: str
+    created_at: datetime.datetime
+
+# ---------------------------------------------------------------------------
+# ENDPOINTS
+# ---------------------------------------------------------------------------
+
+@app.post("/profiles", response_model=ProfileOut)
+def create_profile(token: str = Query(...)):
+    """Create a new WireGuard profile."""
+
+    _require_token(token)
+
+    priv, pub = _generate_keys()
+    ip_str = _next_ip()
+    now = datetime.datetime.utcnow()
+
+    # Attach immediately
+    _attach_peer(pub, ip_str)
+
+    # Append to wg0.conf
+    try:
+        _append_conf_block(pub, ip_str)
+    except Exception as exc:
+        _remove_peer(pub)
+        raise HTTPException(status_code=500, detail=f"Failed to write wg0.conf: {exc}")
+
+    # DB insert
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO wireguard_profiles (private_key, public_key, vpn_address, created_at) VALUES (%s, %s, %s, %s)",
+            (priv, pub, ip_str, now),
+        )
+        profile_id = cur.lastrowid
+    db.commit()
+
+    return ProfileOut(id=profile_id, vpn_address=ip_str, created_at=now)
+
+
+@app.get("/profiles", response_model=List[ProfileOut])
+def list_profiles(token: str = Query(...)):
+    _require_token(token)
+    with db.cursor(dictionary=True) as cur:
+        cur.execute("SELECT id, vpn_address, created_at FROM wireguard_profiles")
+        return cur.fetchall()
+
+
+@app.get("/profiles/{profile_id}/config", response_class=Response, responses={200: {"content": {"text/plain": {}}}})
+def download_config(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
+    _require_token(token)
+
+    with db.cursor(dictionary=True) as cur:
+        cur.execute("SELECT vpn_address, private_key FROM wireguard_profiles WHERE id=%s", (profile_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    conf = (
+        "[Interface]\n"
+        f"PrivateKey = {row['private_key']}\n"
+        f"Address    = {row['vpn_address']}/32\n"
+        f"DNS        = {DNS_SERVERS}\n\n"
+        "[Peer]\n"
+        f"PublicKey         = {SERVER_PUBLIC_KEY}\n"
+        f"Endpoint          = {SERVER_ENDPOINT_IP}:{SERVER_ENDPOINT_PORT}\n"
+        "AllowedIPs        = 0.0.0.0/0\n"
+        "PersistentKeepalive = 20\n"
+    )
+
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f"attachment; filename=wg-profile-{row['vpn_address']}.conf",
+    }
+    return Response(content=conf, media_type="application/octet-stream", headers=headers)
+
+
+@app.delete("/profiles/{profile_id}")
+def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
+    _require_token(token)
+
+    with db.cursor(dictionary=True) as cur:
+        cur.execute("SELECT public_key FROM wireguard_profiles WHERE id=%s", (profile_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    pub = row["public_key"]
+    _remove_peer(pub)
+
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM wireguard_profiles WHERE id=%s", (profile_id,))
+    db.commit()
+
+    return {"status": "deleted", "profile_id": profile_id}
+
+
+# ---------------------------------------------------------------------------
+# PERIODIC STATUS REPORTING
+# ---------------------------------------------------------------------------
+
+def send_status_update():
+    """Gathers system data and profiles and reports them to a central server."""
+    profiles = []
+    try:
+        # Reconnect if connection is lost
+        if not db.is_connected():
+            db.reconnect()
+
+        with db.cursor(dictionary=True) as cur:
+            cur.execute("SELECT id, vpn_address, created_at FROM wireguard_profiles ORDER BY id")
+            db_profiles = cur.fetchall()
+            # Convert datetime to string for JSON serialization
+            for p in db_profiles:
+                if p.get("created_at") and isinstance(p["created_at"], datetime.datetime):
+                    p["created_at"] = p["created_at"].isoformat()
+            profiles = db_profiles
+
+    except mysql.connector.Error as e:
+        print(f"Could not retrieve profiles from database: {e}", file=sys.stderr)
+        # Continue with an empty or partial list of profiles
+
+    payload = {
+        "api_key": API_TOKEN,
+        "wg_interface": WG_INTERFACE,
+        "server_public_key": SERVER_PUBLIC_KEY,
+        "server_endpoint_ip": SERVER_ENDPOINT_IP,
+        "server_endpoint_port": SERVER_ENDPOINT_PORT,
+        "vpn_network": VPN_NETWORK_STR,
+        "dns_servers": DNS_SERVERS,
+        "profiles": profiles,
+    }
+
+    try:
+        print("Sending status update to api.mvpn.space...")
+        response = requests.post("https://api.mvpn.space/status", json=payload, timeout=30)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        print(f"Status update sent successfully (HTTP {response.status_code}).")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to send status update: {e}", file=sys.stderr)
+
+
+def run_periodic_reporter():
+    """Runs send_status_update every 5 minutes in a loop."""
+    print("Starting periodic status reporter...")
+    while True:
+        send_status_update()
+        time.sleep(5 * 60)  # 300 seconds
+
+# ---------------------------------------------------------------------------
+# LOCAL DEV ENTRYPOINT
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Start the background thread for status reporting
+    reporter_thread = threading.Thread(target=run_periodic_reporter, daemon=True)
+    reporter_thread.start()
+
+    uvicorn.run("wg_service:app", host="0.0.0.0", port=LISTEN_PORT, reload=True)
