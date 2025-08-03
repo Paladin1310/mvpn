@@ -96,7 +96,7 @@ echo "==> Создаю Python-venv…"
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
-pip install fastapi "uvicorn[standard]" python-dotenv mysql-connector-python
+pip install fastapi "uvicorn[standard]" python-dotenv mysql-connector-python requests
 deactivate
 
 # ------------------------------------------------------------------
