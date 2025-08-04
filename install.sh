@@ -66,8 +66,9 @@ PrivateKey = ${SERVER_PRIV_KEY}
 SaveConfig = true
 EOF
 # NAT для всей VPN-подсети
-iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o ens3 -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o ens3 -j MASQUERADE
+MAIN_INTERFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE 2>/dev/null || \
+iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE
 
 # сохраняем (чтобы пережило перезагрузку)
 apt-get install -y iptables-persistent
