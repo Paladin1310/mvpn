@@ -251,20 +251,43 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
 
 def send_status_update():
     """Gathers system data and profiles and reports them to a central server."""
-    profiles = []
+    profiles: list[dict] = []
+    active_ids: list[int] = []
     try:
         # Reconnect if connection is lost
         if not db.is_connected():
             db.reconnect()
 
         with db.cursor(dictionary=True) as cur:
-            cur.execute("SELECT id, vpn_address, created_at FROM wireguard_profiles ORDER BY id")
+            cur.execute("SELECT id, vpn_address, public_key, created_at FROM wireguard_profiles ORDER BY id")
             db_profiles = cur.fetchall()
-            # Convert datetime to string for JSON serialization
-            for p in db_profiles:
-                if p.get("created_at") and isinstance(p["created_at"], datetime.datetime):
-                    p["created_at"] = p["created_at"].isoformat()
-            profiles = db_profiles
+
+        # Map of public_key -> profile id for quick lookup
+        key_to_id = {p["public_key"]: p["id"] for p in db_profiles}
+
+        # Convert datetime to string for JSON serialization
+        for p in db_profiles:
+            if p.get("created_at") and isinstance(p["created_at"], datetime.datetime):
+                p["created_at"] = p["created_at"].isoformat()
+            # Remove public_key before sending profile list
+            p.pop("public_key", None)
+        profiles = db_profiles
+
+        # Retrieve handshake info for peers
+        try:
+            dump = _run(["wg", "show", WG_INTERFACE, "dump"]).splitlines()
+            handshakes = {}
+            for line in dump[1:]:
+                parts = line.split("\t")
+                if len(parts) >= 5:
+                    handshakes[parts[0]] = int(parts[4])
+            now = int(time.time())
+            for pub, hs in handshakes.items():
+                profile_id = key_to_id.get(pub)
+                if profile_id and hs and (now - hs) < 180:
+                    active_ids.append(profile_id)
+        except Exception as e:
+            print(f"Could not retrieve handshake info: {e}", file=sys.stderr)
 
     except mysql.connector.Error as e:
         print(f"Could not retrieve profiles from database: {e}", file=sys.stderr)
@@ -279,6 +302,7 @@ def send_status_update():
         "vpn_network": VPN_NETWORK_STR,
         "dns_servers": DNS_SERVERS,
         "profiles": profiles,
+        "active_profile_ids": active_ids,
     }
 
     try:
