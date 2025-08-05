@@ -28,7 +28,7 @@ fi
 
 # WireGuard — серверные параметры
 SERVER_WG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
-SERVER_LISTEN_PORT="630"
+SERVER_LISTEN_PORT="80"
 
 # Генерируем секреты / переменные окружения
 API_TOKEN=$(openssl rand -hex 32)
