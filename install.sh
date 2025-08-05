@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# install_wg_service.sh — быстрый деплой /opt/wg_service.py + wg0 + MySQL на Ubuntu 24.04
+# install.sh — deploy /opt/ovpn_service.py + OpenVPN + MySQL on Ubuntu 24.04
 
 set -euo pipefail
 
 # ------------------------------------------------------------------
-# 1. Проверки и переменные
+# 1. Checks and variables
 # ------------------------------------------------------------------
 if [[ $EUID -ne 0 ]]; then
-  echo "Пожалуйста, запускайте скрипт от root." >&2
+  echo "Please run as root" >&2
   exit 1
 fi
 
-WG_SERVICE_FILE="/opt/wg_service.py"
-if [[ ! -f "$WG_SERVICE_FILE" ]]; then
-  echo "Файл $WG_SERVICE_FILE не найден. Скопируйте его перед запуском." >&2
+OVPN_SERVICE_FILE="/opt/ovpn_service.py"
+if [[ ! -f "$OVPN_SERVICE_FILE" ]]; then
+  echo "File $OVPN_SERVICE_FILE not found. Copy it before running." >&2
   exit 1
 fi
 
@@ -21,79 +21,94 @@ PUBLIC_IP="${1:-}"
 if [[ -z "$PUBLIC_IP" ]]; then
   PUBLIC_IP=$(curl -s https://api.ipify.org || true)
   [[ -z "$PUBLIC_IP" ]] && {
-    echo "Укажите внешний IP: ./install_wg_service.sh <PUBLIC_IP>" >&2
+    echo "Usage: ./install.sh <PUBLIC_IP>" >&2
     exit 1
   }
 fi
 
-# WireGuard — серверные параметры
-SERVER_WG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
-SERVER_LISTEN_PORT="51820"
+SERVER_NETWORK="10.100.10.0 255.255.255.0"
+SERVER_PORT="1194"
 
-# Генерируем секреты / переменные окружения
 API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
-MYSQL_USER="wg_user"
-MYSQL_DB="wg_panel"
-WG_INTERFACE="wg0"
+MYSQL_USER="ovpn_user"
+MYSQL_DB="ovpn_panel"
 API_PORT="8080"
 WORKERS=$(( $(nproc) * 2 ))
-VENV_DIR="/opt/wg_service_venv"
+VENV_DIR="/opt/ovpn_service_venv"
+EASYRSA_DIR="/etc/openvpn/easy-rsa"
+TLS_CRYPT_V2_SERVER_KEY="/etc/openvpn/server/tc_v2_server.key"
+CLIENT_KEYS_DIR="/etc/openvpn/clients"
+STATUS_LOG="/var/log/openvpn-status.log"
 
 # ------------------------------------------------------------------
-# 2. Системные зависимости
+# 2. System packages
 # ------------------------------------------------------------------
-echo "==> Устанавливаю системные пакеты…"
+echo "==> Installing system packages..."
 apt update -y
-apt install -y --no-install-recommends \
-  wireguard iproute2 python3-venv python3-pip mariadb-server curl
+apt install -y --no-install-recommends openvpn easy-rsa iproute2 python3-venv python3-pip mariadb-server curl
 
 # ------------------------------------------------------------------
-# 3. Настройка WireGuard (wg0)
+# 3. OpenVPN server
 # ------------------------------------------------------------------
-echo "==> Настраиваю интерфейс WireGuard ${WG_INTERFACE}…"
-mkdir -p /etc/wireguard
-umask 077
-[[ -f /etc/wireguard/server_private.key ]] || wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
-SERVER_PRIV_KEY=$(cat /etc/wireguard/server_private.key)
-SERVER_PUB_KEY=$(cat /etc/wireguard/server_public.key)
+echo "==> Setting up OpenVPN server..."
+mkdir -p /etc/openvpn/server
+mkdir -p "$CLIENT_KEYS_DIR"
+make-cadir "$EASYRSA_DIR"
+cd "$EASYRSA_DIR"
+EASYRSA_BATCH=1 ./easyrsa init-pki
+EASYRSA_BATCH=1 ./easyrsa build-ca nopass
+EASYRSA_BATCH=1 ./easyrsa gen-dh
+EASYRSA_BATCH=1 ./easyrsa build-server-full server nopass
+cp pki/ca.crt pki/dh.pem pki/private/server.key pki/issued/server.crt /etc/openvpn/server/
+openvpn --genkey tls-crypt-v2-server "$TLS_CRYPT_V2_SERVER_KEY"
 
-cat >/etc/wireguard/${WG_INTERFACE}.conf <<EOF
-[Interface]
-Address = ${SERVER_WG_ADDR}
-ListenPort = ${SERVER_LISTEN_PORT}
-PrivateKey = ${SERVER_PRIV_KEY}
-SaveConfig = true
+cat >/etc/openvpn/server/server.conf <<EOF
+port ${SERVER_PORT}
+proto udp
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+server ${SERVER_NETWORK}
+ifconfig-pool-persist ipp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 8.8.8.8"
+keepalive 10 120
+tls-crypt-v2 ${TLS_CRYPT_V2_SERVER_KEY}
+cipher AES-256-GCM
+user nobody
+group nogroup
+persist-key
+persist-tun
+status ${STATUS_LOG}
+verb 3
 EOF
-# NAT для всей VPN-подсети
-MAIN_INTERFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE
 
-# сохраняем (чтобы пережило перезагрузку)
+MAIN_INTERFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+iptables -t nat -C POSTROUTING -s ${SERVER_NETWORK%% *}/24 -o $MAIN_INTERFACE -j MASQUERADE 2>/dev/null || \
+iptables -t nat -A POSTROUTING -s ${SERVER_NETWORK%% *}/24 -o $MAIN_INTERFACE -j MASQUERADE
 apt-get install -y iptables-persistent
 netfilter-persistent save
-
-# Включаем форвардинг
 sysctl -w net.ipv4.ip_forward=1
 grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 
-# Поднимаем интерфейс
-systemctl enable --now wg-quick@${WG_INTERFACE}
+systemctl enable --now openvpn-server@server
 
 # ------------------------------------------------------------------
-# 4. MariaDB / MySQL
+# 4. MariaDB
 # ------------------------------------------------------------------
-echo "==> Настраиваю MariaDB…"
+echo "==> Configuring MariaDB..."
 systemctl enable --now mariadb
 mysql -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -e "CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';"
 mysql -e "GRANT ALL PRIVILEGES ON \`${MYSQL_DB}\`.* TO '${MYSQL_USER}'@'localhost'; FLUSH PRIVILEGES;"
 
 # ------------------------------------------------------------------
-# 5. Python-виртуальное окружение
+# 5. Python virtual environment
 # ------------------------------------------------------------------
-echo "==> Создаю Python-venv…"
+echo "==> Creating Python venv..."
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
@@ -101,41 +116,38 @@ pip install fastapi "uvicorn[standard]" python-dotenv mysql-connector-python req
 deactivate
 
 # ------------------------------------------------------------------
-# 6. Env-файл для API
+# 6. Environment file
 # ------------------------------------------------------------------
-cat >/etc/wg-service.env <<EOF
+cat >/etc/ovpn-service.env <<EOF
 API_TOKEN=${API_TOKEN}
-WG_INTERFACE=${WG_INTERFACE}
 API_PORT=${API_PORT}
-
-# Сетевые данные сервера WG (для клиентских конфигов)
-SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
-SERVER_ENDPOINT_IP=${PUBLIC_IP}
-SERVER_ENDPOINT_PORT=${SERVER_LISTEN_PORT}
-
-# MySQL
 MYSQL_HOST=127.0.0.1
 MYSQL_DB=${MYSQL_DB}
 MYSQL_USER=${MYSQL_USER}
 MYSQL_PASSWORD=${MYSQL_PASSWORD}
+SERVER_ENDPOINT_IP=${PUBLIC_IP}
+SERVER_ENDPOINT_PORT=${SERVER_PORT}
+EASYRSA_DIR=${EASYRSA_DIR}
+TLS_CRYPT_V2_SERVER_KEY=${TLS_CRYPT_V2_SERVER_KEY}
+CLIENT_KEYS_DIR=${CLIENT_KEYS_DIR}
+STATUS_LOG=${STATUS_LOG}
 EOF
-chmod 600 /etc/wg-service.env
+chmod 600 /etc/ovpn-service.env
 
 # ------------------------------------------------------------------
-# 7. systemd-юнит
+# 7. systemd service
 # ------------------------------------------------------------------
-SERVICE_FILE=/etc/systemd/system/wg-service.service
+SERVICE_FILE=/etc/systemd/system/ovpn-service.service
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=WireGuard Profile API (via virtualenv)
-After=network.target mariadb.service wg-quick@${WG_INTERFACE}.service
-Requires=wg-quick@${WG_INTERFACE}.service
+Description=OpenVPN Profile API (via virtualenv)
+After=network.target mariadb.service openvpn-server@server.service
+Requires=openvpn-server@server.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/wg-service.env
-# uvicorn запускает wg_service:app
-ExecStart=${VENV_DIR}/bin/uvicorn wg_service:app --host 0.0.0.0 --port \${API_PORT} --workers ${WORKERS}
+EnvironmentFile=/etc/ovpn-service.env
+ExecStart=${VENV_DIR}/bin/uvicorn ovpn_service:app --host 0.0.0.0 --port \${API_PORT} --workers ${WORKERS}
 WorkingDirectory=/opt
 Restart=always
 RestartSec=5
@@ -146,26 +158,26 @@ EOF
 
 chmod 644 "$SERVICE_FILE"
 systemctl daemon-reload
-systemctl enable --now wg-service.service
+systemctl enable --now ovpn-service.service
 
 # ------------------------------------------------------------------
-# 8. Фаервол (UFW) — опционально
+# 8. Firewall
 # ------------------------------------------------------------------
 if command -v ufw >/dev/null; then
-  ufw allow ${SERVER_LISTEN_PORT}/udp || true
+  ufw allow ${SERVER_PORT}/udp || true
 fi
 
 # ------------------------------------------------------------------
-# 9. Итог
+# 9. Summary
 # ------------------------------------------------------------------
 echo "------------------------------------------------------------"
-echo "✅  Установка завершена."
-echo "   WireGuard интерфейс: ${WG_INTERFACE} (${SERVER_WG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
-echo "   API слушает: http://${PUBLIC_IP}:${API_PORT}"
-echo "   Токен: ${API_TOKEN}"
+echo "✅  Installation complete."
+echo "   OpenVPN port: ${SERVER_PORT}/udp"
+echo "   API listens: http://${PUBLIC_IP}:${API_PORT}"
+echo "   Token: ${API_TOKEN}"
 echo
-echo "   Пример запроса (создать профиль для user_id=1):"
-echo "     curl -X POST \"http://${PUBLIC_IP}:${API_PORT}/profiles?token=${API_TOKEN}&user_id=1\""
+echo "   Example request to create a profile:"
+echo "     curl -X POST \"http://${PUBLIC_IP}:${API_PORT}/profiles?token=${API_TOKEN}\""
 echo
-echo "   Логи: journalctl -u wg-service -f"
+echo "   Logs: journalctl -u ovpn-service -f"
 echo "------------------------------------------------------------"
