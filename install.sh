@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install_wg_service.sh — быстрый деплой /opt/wg_service.py + awg0 + MySQL на Ubuntu 24.04
+# install_wg_service.sh — быстрый деплой /opt/wg_service.py + wg0 + MySQL на Ubuntu 24.04
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ if [[ -z "$PUBLIC_IP" ]]; then
   }
 fi
 
-# AmneziaWG — серверные параметры
+# WireGuard — серверные параметры
 SERVER_WG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
 SERVER_LISTEN_PORT="51820"
 
@@ -35,21 +35,10 @@ API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
 MYSQL_USER="wg_user"
 MYSQL_DB="wg_panel"
-WG_INTERFACE="awg0"
+WG_INTERFACE="wg0"
 API_PORT="8080"
 WORKERS=$(( $(nproc) * 2 ))
 VENV_DIR="/opt/wg_service_venv"
-
-# Обфускационные параметры AmneziaWG (можно переопределить переменными окружения)
-AWG_JC=${AWG_JC:-20}
-AWG_JMIN=${AWG_JMIN:-40}
-AWG_JMAX=${AWG_JMAX:-80}
-AWG_S1=${AWG_S1:-40}
-AWG_S2=${AWG_S2:-40}
-AWG_H1=${AWG_H1:-$((0x$(openssl rand -hex 4)))}
-AWG_H2=${AWG_H2:-$((0x$(openssl rand -hex 4)))}
-AWG_H3=${AWG_H3:-$((0x$(openssl rand -hex 4)))}
-AWG_H4=${AWG_H4:-$((0x$(openssl rand -hex 4)))}
 
 # ------------------------------------------------------------------
 # 2. Системные зависимости
@@ -57,67 +46,23 @@ AWG_H4=${AWG_H4:-$((0x$(openssl rand -hex 4)))}
 echo "==> Устанавливаю системные пакеты…"
 apt update -y
 apt install -y --no-install-recommends \
-  iproute2 python3-venv python3-pip mariadb-server curl unzip \
-  git golang-go openssl
-
-echo "==> Устанавливаю AmneziaWG tools…"
-AWG_URL="https://github.com/amnezia-vpn/amneziawg-tools/releases/latest/download/ubuntu-22.04-amneziawg-tools.zip"
-TMP_DIR=$(mktemp -d)
-curl -L "$AWG_URL" -o "$TMP_DIR/awgtools.zip"
-unzip -q "$TMP_DIR/awgtools.zip" -d "$TMP_DIR"
-install -m 755 "$TMP_DIR"/ubuntu-22.04-amneziawg-tools/awg "$TMP_DIR"/ubuntu-22.04-amneziawg-tools/awg-quick /usr/local/bin
-rm -rf "$TMP_DIR"
-
-echo "==> Собираю userspace-бинарник amneziawg-go…"
-GO_TMP=$(mktemp -d)
-GOBIN=/usr/local/bin GOPATH="$GO_TMP" go install github.com/amnezia-vpn/amneziawg-go@latest
-rm -rf "$GO_TMP"
-
-cat >/etc/systemd/system/awg-quick@.service <<'EOF'
-[Unit]
-Description=AmneziaWG tunnel %i
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
-ExecStart=/usr/local/bin/awg-quick up %i
-ExecStop=/usr/local/bin/awg-quick down %i
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
+  wireguard iproute2 python3-venv python3-pip mariadb-server curl
 
 # ------------------------------------------------------------------
-# 3. Настройка AmneziaWG (awg0)
+# 3. Настройка WireGuard (wg0)
 # ------------------------------------------------------------------
-echo "==> Настраиваю интерфейс AmneziaWG ${WG_INTERFACE}…"
-# awg-quick ищет конфиги в /etc/amnezia/amneziawg по умолчанию
-WG_DIR="/etc/amnezia/amneziawg"
-mkdir -p "$WG_DIR"
+echo "==> Настраиваю интерфейс WireGuard ${WG_INTERFACE}…"
+mkdir -p /etc/wireguard
 umask 077
-[[ -f "$WG_DIR/server_private.key" ]] || awg genkey | tee "$WG_DIR/server_private.key" | awg pubkey > "$WG_DIR/server_public.key"
-SERVER_PRIV_KEY=$(cat "$WG_DIR/server_private.key")
-SERVER_PUB_KEY=$(cat "$WG_DIR/server_public.key")
+[[ -f /etc/wireguard/server_private.key ]] || wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+SERVER_PRIV_KEY=$(cat /etc/wireguard/server_private.key)
+SERVER_PUB_KEY=$(cat /etc/wireguard/server_public.key)
 
-cat >"$WG_DIR/${WG_INTERFACE}.conf" <<EOF
+cat >/etc/wireguard/${WG_INTERFACE}.conf <<EOF
 [Interface]
 Address = ${SERVER_WG_ADDR}
 ListenPort = ${SERVER_LISTEN_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
-Jc = ${AWG_JC}
-Jmin = ${AWG_JMIN}
-Jmax = ${AWG_JMAX}
-S1 = ${AWG_S1}
-S2 = ${AWG_S2}
-H1 = ${AWG_H1}
-H2 = ${AWG_H2}
-H3 = ${AWG_H3}
-H4 = ${AWG_H4}
 SaveConfig = true
 EOF
 # NAT для всей VPN-подсети
@@ -126,7 +71,7 @@ iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERAD
 iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE
 
 # сохраняем (чтобы пережило перезагрузку)
-DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+apt-get install -y iptables-persistent
 netfilter-persistent save
 
 # Включаем форвардинг
@@ -134,7 +79,7 @@ sysctl -w net.ipv4.ip_forward=1
 grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 
 # Поднимаем интерфейс
-systemctl enable --now awg-quick@${WG_INTERFACE}
+systemctl enable --now wg-quick@${WG_INTERFACE}
 
 # ------------------------------------------------------------------
 # 4. MariaDB / MySQL
@@ -162,24 +107,11 @@ cat >/etc/wg-service.env <<EOF
 API_TOKEN=${API_TOKEN}
 WG_INTERFACE=${WG_INTERFACE}
 API_PORT=${API_PORT}
-WG_CLI=awg
-WG_CONF_DIR=${WG_DIR}
 
-# Сетевые данные сервера AWG (для клиентских конфигов)
+# Сетевые данные сервера WG (для клиентских конфигов)
 SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
 SERVER_ENDPOINT_IP=${PUBLIC_IP}
 SERVER_ENDPOINT_PORT=${SERVER_LISTEN_PORT}
-
-# Параметры обфускации
-WG_JC=${AWG_JC}
-WG_JMIN=${AWG_JMIN}
-WG_JMAX=${AWG_JMAX}
-WG_S1=${AWG_S1}
-WG_S2=${AWG_S2}
-WG_H1=${AWG_H1}
-WG_H2=${AWG_H2}
-WG_H3=${AWG_H3}
-WG_H4=${AWG_H4}
 
 # MySQL
 MYSQL_HOST=127.0.0.1
@@ -195,9 +127,9 @@ chmod 600 /etc/wg-service.env
 SERVICE_FILE=/etc/systemd/system/wg-service.service
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=AmneziaWG Profile API (via virtualenv)
-After=network.target mariadb.service awg-quick@${WG_INTERFACE}.service
-Requires=awg-quick@${WG_INTERFACE}.service
+Description=WireGuard Profile API (via virtualenv)
+After=network.target mariadb.service wg-quick@${WG_INTERFACE}.service
+Requires=wg-quick@${WG_INTERFACE}.service
 
 [Service]
 Type=simple
@@ -228,7 +160,7 @@ fi
 # ------------------------------------------------------------------
 echo "------------------------------------------------------------"
 echo "✅  Установка завершена."
-echo "   AmneziaWG интерфейс: ${WG_INTERFACE} (${SERVER_WG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
+echo "   WireGuard интерфейс: ${WG_INTERFACE} (${SERVER_WG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
 echo "   API слушает: http://${PUBLIC_IP}:${API_PORT}"
 echo "   Токен: ${API_TOKEN}"
 echo
