@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install_wg_service.sh — быстрый деплой /opt/wg_service.py + awg0 + MySQL на Ubuntu 24.04
+# install_awg_service.sh — быстрый деплой /opt/awg_service.py + awg0 + MySQL на Ubuntu 24.04
 
 set -euo pipefail
 
@@ -11,9 +11,9 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-WG_SERVICE_FILE="/opt/wg_service.py"
-if [[ ! -f "$WG_SERVICE_FILE" ]]; then
-  echo "Файл $WG_SERVICE_FILE не найден. Скопируйте его перед запуском." >&2
+AWG_SERVICE_FILE="/opt/awg_service.py"
+if [[ ! -f "$AWG_SERVICE_FILE" ]]; then
+  echo "Файл $AWG_SERVICE_FILE не найден. Скопируйте его перед запуском." >&2
   exit 1
 fi
 
@@ -21,24 +21,24 @@ PUBLIC_IP="${1:-}"
 if [[ -z "$PUBLIC_IP" ]]; then
   PUBLIC_IP=$(curl -s https://api.ipify.org || true)
   [[ -z "$PUBLIC_IP" ]] && {
-    echo "Укажите внешний IP: ./install_wg_service.sh <PUBLIC_IP>" >&2
+    echo "Укажите внешний IP: ./install_awg_service.sh <PUBLIC_IP>" >&2
     exit 1
   }
 fi
 
 # AmneziaWG — серверные параметры
-SERVER_WG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
+SERVER_AWG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
 SERVER_LISTEN_PORT="51820"
 
 # Генерируем секреты / переменные окружения
 API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
-MYSQL_USER="wg_user"
-MYSQL_DB="wg_panel"
-WG_INTERFACE="awg0"
+MYSQL_USER="awg_user"
+MYSQL_DB="awg_panel"
+AWG_INTERFACE="awg0"
 API_PORT="8080"
 WORKERS=$(( $(nproc) * 2 ))
-VENV_DIR="/opt/wg_service_venv"
+VENV_DIR="/opt/awg_service_venv"
 
 # Обфускационные параметры AmneziaWG (можно переопределить переменными окружения)
 AWG_JC=${AWG_JC:-20}
@@ -95,18 +95,18 @@ systemctl daemon-reload
 # ------------------------------------------------------------------
 # 3. Настройка AmneziaWG (awg0)
 # ------------------------------------------------------------------
-echo "==> Настраиваю интерфейс AmneziaWG ${WG_INTERFACE}…"
+echo "==> Настраиваю интерфейс AmneziaWG ${AWG_INTERFACE}…"
 # awg-quick ищет конфиги в /etc/amnezia/amneziawg по умолчанию
-WG_DIR="/etc/amnezia/amneziawg"
-mkdir -p "$WG_DIR"
+AWG_CONF_DIR="/etc/amnezia/amneziawg"
+mkdir -p "$AWG_CONF_DIR"
 umask 077
-[[ -f "$WG_DIR/server_private.key" ]] || awg genkey | tee "$WG_DIR/server_private.key" | awg pubkey > "$WG_DIR/server_public.key"
-SERVER_PRIV_KEY=$(cat "$WG_DIR/server_private.key")
-SERVER_PUB_KEY=$(cat "$WG_DIR/server_public.key")
+[[ -f "$AWG_CONF_DIR/server_private.key" ]] || awg genkey | tee "$AWG_CONF_DIR/server_private.key" | awg pubkey > "$AWG_CONF_DIR/server_public.key"
+SERVER_PRIV_KEY=$(cat "$AWG_CONF_DIR/server_private.key")
+SERVER_PUB_KEY=$(cat "$AWG_CONF_DIR/server_public.key")
 
-cat >"$WG_DIR/${WG_INTERFACE}.conf" <<EOF
+cat >"$AWG_CONF_DIR/${AWG_INTERFACE}.conf" <<EOF
 [Interface]
-Address = ${SERVER_WG_ADDR}
+Address = ${SERVER_AWG_ADDR}
 ListenPort = ${SERVER_LISTEN_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
 Jc = ${AWG_JC}
@@ -134,7 +134,7 @@ sysctl -w net.ipv4.ip_forward=1
 grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 
 # Поднимаем интерфейс
-systemctl enable --now awg-quick@${WG_INTERFACE}
+systemctl enable --now awg-quick@${AWG_INTERFACE}
 
 # ------------------------------------------------------------------
 # 4. MariaDB / MySQL
@@ -158,12 +158,12 @@ deactivate
 # ------------------------------------------------------------------
 # 6. Env-файл для API
 # ------------------------------------------------------------------
-cat >/etc/wg-service.env <<EOF
+cat >/etc/awg-service.env <<EOF
 API_TOKEN=${API_TOKEN}
-WG_INTERFACE=${WG_INTERFACE}
+AWG_INTERFACE=${AWG_INTERFACE}
 API_PORT=${API_PORT}
-WG_CLI=awg
-WG_CONF_DIR=${WG_DIR}
+AWG_CLI=awg
+AWG_CONF_DIR=${AWG_CONF_DIR}
 
 # Сетевые данные сервера AWG (для клиентских конфигов)
 SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
@@ -171,15 +171,15 @@ SERVER_ENDPOINT_IP=${PUBLIC_IP}
 SERVER_ENDPOINT_PORT=${SERVER_LISTEN_PORT}
 
 # Параметры обфускации
-WG_JC=${AWG_JC}
-WG_JMIN=${AWG_JMIN}
-WG_JMAX=${AWG_JMAX}
-WG_S1=${AWG_S1}
-WG_S2=${AWG_S2}
-WG_H1=${AWG_H1}
-WG_H2=${AWG_H2}
-WG_H3=${AWG_H3}
-WG_H4=${AWG_H4}
+AWG_JC=${AWG_JC}
+AWG_JMIN=${AWG_JMIN}
+AWG_JMAX=${AWG_JMAX}
+AWG_S1=${AWG_S1}
+AWG_S2=${AWG_S2}
+AWG_H1=${AWG_H1}
+AWG_H2=${AWG_H2}
+AWG_H3=${AWG_H3}
+AWG_H4=${AWG_H4}
 
 # MySQL
 MYSQL_HOST=127.0.0.1
@@ -187,23 +187,23 @@ MYSQL_DB=${MYSQL_DB}
 MYSQL_USER=${MYSQL_USER}
 MYSQL_PASSWORD=${MYSQL_PASSWORD}
 EOF
-chmod 600 /etc/wg-service.env
+chmod 600 /etc/awg-service.env
 
 # ------------------------------------------------------------------
 # 7. systemd-юнит
 # ------------------------------------------------------------------
-SERVICE_FILE=/etc/systemd/system/wg-service.service
+SERVICE_FILE=/etc/systemd/system/awg-service.service
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
 Description=AmneziaWG Profile API (via virtualenv)
-After=network.target mariadb.service awg-quick@${WG_INTERFACE}.service
-Requires=awg-quick@${WG_INTERFACE}.service
+After=network.target mariadb.service awg-quick@${AWG_INTERFACE}.service
+Requires=awg-quick@${AWG_INTERFACE}.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/wg-service.env
-# uvicorn запускает wg_service:app
-ExecStart=${VENV_DIR}/bin/uvicorn wg_service:app --host 0.0.0.0 --port \${API_PORT} --workers ${WORKERS}
+EnvironmentFile=/etc/awg-service.env
+# uvicorn запускает awg_service:app
+ExecStart=${VENV_DIR}/bin/uvicorn awg_service:app --host 0.0.0.0 --port \${API_PORT} --workers ${WORKERS}
 WorkingDirectory=/opt
 Restart=always
 RestartSec=5
@@ -214,7 +214,7 @@ EOF
 
 chmod 644 "$SERVICE_FILE"
 systemctl daemon-reload
-systemctl enable --now wg-service.service
+systemctl enable --now awg-service.service
 
 # ------------------------------------------------------------------
 # 8. Фаервол (UFW) — опционально
@@ -228,12 +228,12 @@ fi
 # ------------------------------------------------------------------
 echo "------------------------------------------------------------"
 echo "✅  Установка завершена."
-echo "   AmneziaWG интерфейс: ${WG_INTERFACE} (${SERVER_WG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
+echo "   AmneziaWG интерфейс: ${AWG_INTERFACE} (${SERVER_AWG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
 echo "   API слушает: http://${PUBLIC_IP}:${API_PORT}"
 echo "   Токен: ${API_TOKEN}"
 echo
 echo "   Пример запроса (создать профиль для user_id=1):"
 echo "     curl -X POST \"http://${PUBLIC_IP}:${API_PORT}/profiles?token=${API_TOKEN}&user_id=1\""
 echo
-echo "   Логи: journalctl -u wg-service -f"
+echo "   Логи: journalctl -u awg-service -f"
 echo "------------------------------------------------------------"
