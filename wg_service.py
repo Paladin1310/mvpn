@@ -43,7 +43,7 @@ MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "wg_pass")
 WG_INTERFACE: str = os.getenv("WG_INTERFACE", "wg0")
 SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<server‑pubkey>")
 SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", "1.2.3.4")
-SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "630"))
+SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "80"))
 
 VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "10.100.10.0/24")
 DNS_SERVERS: str = os.getenv("DNS_SERVERS", "8.8.8.8")
