@@ -1,13 +1,13 @@
-"""WireGuard Profile Management API — no accounts, one API key
+"""AmneziaWG Profile Management API — no accounts, one API key
 ===========================================================
 Minimal FastAPI service that automates creation / listing / deletion of
-WireGuard peers while persisting data in MySQL. **No per‑user accounts or
+AmneziaWG peers while persisting data in MySQL. **No per‑user accounts or
 quotas** — a single shared `API_TOKEN` protects every endpoint.
 
 Key flow (matches the original PHP description minus auth):
 ----------------------------------------------------------------
 1. **POST /profiles** – generates key pair, picks next IP, attaches the peer via
-   `wg set`, appends a `[Peer]` block to `/etc/wireguard/wg0.conf`, stores data
+   `awg set`, appends a `[Peer]` block to `/etc/amnezia/amneziawg/awg0.conf`, stores data
    in `wireguard_profiles`, and returns JSON with profile metadata.
 2. **GET /profiles** – returns the list of every existing profile.
 3. **GET /profiles/{id}/config** – produces a ready `.conf` file for the client.
@@ -40,7 +40,7 @@ MYSQL_DB: str = os.getenv("MYSQL_DB", "wg_panel")
 MYSQL_USER: str = os.getenv("MYSQL_USER", "wg_user")
 MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "wg_pass")
 
-WG_INTERFACE: str = os.getenv("WG_INTERFACE", "wg0")
+WG_INTERFACE: str = os.getenv("WG_INTERFACE", "awg0")
 SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<server‑pubkey>")
 SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", "1.2.3.4")
 SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "51830"))
@@ -49,7 +49,20 @@ VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "10.100.10.0/24")
 DNS_SERVERS: str = os.getenv("DNS_SERVERS", "8.8.8.8")
 
 LISTEN_PORT: int = int(os.getenv("API_PORT", "8080"))
-WG_CONF_PATH: Path = Path("/etc/wireguard") / f"{WG_INTERFACE}.conf"
+WG_CLI: str = os.getenv("WG_CLI", "awg")
+WG_CONF_DIR: Path = Path(os.getenv("WG_CONF_DIR", "/etc/amnezia/amneziawg"))
+WG_CONF_PATH: Path = WG_CONF_DIR / f"{WG_INTERFACE}.conf"
+
+# Optional AmneziaWG obfuscation parameters (device-level)
+AWG_JC: str = os.getenv("WG_JC", "0")
+AWG_JMIN: str = os.getenv("WG_JMIN", "0")
+AWG_JMAX: str = os.getenv("WG_JMAX", "0")
+AWG_S1: str = os.getenv("WG_S1", "0")
+AWG_S2: str = os.getenv("WG_S2", "0")
+AWG_H1: str = os.getenv("WG_H1", "0")
+AWG_H2: str = os.getenv("WG_H2", "0")
+AWG_H3: str = os.getenv("WG_H3", "0")
+AWG_H4: str = os.getenv("WG_H4", "0")
 
 try:
     VPN_NETWORK = ipaddress.ip_network(VPN_NETWORK_STR)
@@ -85,7 +98,7 @@ with db.cursor() as cur:
 # FASTAPI APP
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="WireGuard API", version="3.0.0")
+app = FastAPI(title="AmneziaWG API", version="3.0.0")
 
 # ---------------------------------------------------------------------------
 # UTILS
@@ -110,8 +123,8 @@ def _run(cmd: list[str], *, input_: str | None = None) -> str:
 
 
 def _generate_keys() -> tuple[str, str]:
-    priv = _run(["wg", "genkey"])
-    pub = _run(["wg", "pubkey"], input_=priv)
+    priv = _run([WG_CLI, "genkey"])
+    pub = _run([WG_CLI, "pubkey"], input_=priv)
     return priv, pub
 
 
@@ -131,11 +144,11 @@ def _next_ip() -> str:
 
 
 def _attach_peer(pubkey: str, ip_: str):
-    _run(["wg", "set", WG_INTERFACE, "peer", pubkey, "allowed-ips", f"{ip_}/32"])
+    _run([WG_CLI, "set", WG_INTERFACE, "peer", pubkey, "allowed-ips", f"{ip_}/32"])
 
 
 def _remove_peer(pubkey: str):
-    _run(["wg", "set", WG_INTERFACE, "peer", pubkey, "remove"])
+    _run([WG_CLI, "set", WG_INTERFACE, "peer", pubkey, "remove"])
 
 
 def _append_conf_block(pubkey: str, ip_: str):
@@ -158,7 +171,7 @@ class ProfileOut(BaseModel):
 
 @app.post("/profiles", response_model=ProfileOut)
 def create_profile(token: str = Query(...)):
-    """Create a new WireGuard profile."""
+    """Create a new AmneziaWG profile."""
 
     _require_token(token)
 
@@ -210,7 +223,16 @@ def download_config(profile_id: int = FPath(..., ge=1), token: str = Query(...))
         "[Interface]\n"
         f"PrivateKey = {row['private_key']}\n"
         f"Address    = {row['vpn_address']}/32\n"
-        f"DNS        = {DNS_SERVERS}\n\n"
+        f"DNS        = {DNS_SERVERS}\n"
+        f"Jc         = {AWG_JC}\n"
+        f"Jmin       = {AWG_JMIN}\n"
+        f"Jmax       = {AWG_JMAX}\n"
+        f"S1         = {AWG_S1}\n"
+        f"S2         = {AWG_S2}\n"
+        f"H1         = {AWG_H1}\n"
+        f"H2         = {AWG_H2}\n"
+        f"H3         = {AWG_H3}\n"
+        f"H4         = {AWG_H4}\n\n"
         "[Peer]\n"
         f"PublicKey         = {SERVER_PUBLIC_KEY}\n"
         f"Endpoint          = {SERVER_ENDPOINT_IP}:{SERVER_ENDPOINT_PORT}\n"
@@ -275,7 +297,7 @@ def send_status_update():
 
         # Retrieve handshake info for peers
         try:
-            dump = _run(["wg", "show", WG_INTERFACE, "dump"]).splitlines()
+            dump = _run([WG_CLI, "show", WG_INTERFACE, "dump"]).splitlines()
             handshakes = {}
             for line in dump[1:]:
                 parts = line.split("\t")
