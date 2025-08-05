@@ -7,7 +7,7 @@ quotas** — a single shared `API_TOKEN` protects every endpoint.
 Key flow (matches the original PHP description minus auth):
 ----------------------------------------------------------------
 1. **POST /profiles** – generates key pair, picks next IP, attaches the peer via
-   `awg set`, appends a `[Peer]` block to `/etc/amneziawg/awg0.conf`, stores data
+   `awg set`, appends a `[Peer]` block to `/etc/amnezia/amneziawg/awg0.conf`, stores data
    in `wireguard_profiles`, and returns JSON with profile metadata.
 2. **GET /profiles** – returns the list of every existing profile.
 3. **GET /profiles/{id}/config** – produces a ready `.conf` file for the client.
@@ -50,7 +50,7 @@ DNS_SERVERS: str = os.getenv("DNS_SERVERS", "8.8.8.8")
 
 LISTEN_PORT: int = int(os.getenv("API_PORT", "8080"))
 WG_CLI: str = os.getenv("WG_CLI", "awg")
-WG_CONF_DIR: Path = Path(os.getenv("WG_CONF_DIR", "/etc/amneziawg"))
+WG_CONF_DIR: Path = Path(os.getenv("WG_CONF_DIR", "/etc/amnezia/amneziawg"))
 WG_CONF_PATH: Path = WG_CONF_DIR / f"{WG_INTERFACE}.conf"
 
 try:

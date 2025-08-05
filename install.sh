@@ -78,13 +78,15 @@ systemctl daemon-reload
 # 3. Настройка AmneziaWG (awg0)
 # ------------------------------------------------------------------
 echo "==> Настраиваю интерфейс AmneziaWG ${WG_INTERFACE}…"
-mkdir -p /etc/amneziawg
+# awg-quick ищет конфиги в /etc/amnezia/amneziawg по умолчанию
+WG_DIR="/etc/amnezia/amneziawg"
+mkdir -p "$WG_DIR"
 umask 077
-[[ -f /etc/amneziawg/server_private.key ]] || awg genkey | tee /etc/amneziawg/server_private.key | awg pubkey > /etc/amneziawg/server_public.key
-SERVER_PRIV_KEY=$(cat /etc/amneziawg/server_private.key)
-SERVER_PUB_KEY=$(cat /etc/amneziawg/server_public.key)
+[[ -f "$WG_DIR/server_private.key" ]] || awg genkey | tee "$WG_DIR/server_private.key" | awg pubkey > "$WG_DIR/server_public.key"
+SERVER_PRIV_KEY=$(cat "$WG_DIR/server_private.key")
+SERVER_PUB_KEY=$(cat "$WG_DIR/server_public.key")
 
-cat >/etc/amneziawg/${WG_INTERFACE}.conf <<EOF
+cat >"$WG_DIR/${WG_INTERFACE}.conf" <<EOF
 [Interface]
 Address = ${SERVER_WG_ADDR}
 ListenPort = ${SERVER_LISTEN_PORT}
@@ -134,7 +136,7 @@ API_TOKEN=${API_TOKEN}
 WG_INTERFACE=${WG_INTERFACE}
 API_PORT=${API_PORT}
 WG_CLI=awg
-WG_CONF_DIR=/etc/amneziawg
+WG_CONF_DIR=${WG_DIR}
 
 # Сетевые данные сервера AWG (для клиентских конфигов)
 SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
