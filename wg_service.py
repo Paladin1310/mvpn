@@ -53,6 +53,17 @@ WG_CLI: str = os.getenv("WG_CLI", "awg")
 WG_CONF_DIR: Path = Path(os.getenv("WG_CONF_DIR", "/etc/amnezia/amneziawg"))
 WG_CONF_PATH: Path = WG_CONF_DIR / f"{WG_INTERFACE}.conf"
 
+# Optional AmneziaWG obfuscation parameters (device-level)
+AWG_JC: str = os.getenv("WG_JC", "0")
+AWG_JMIN: str = os.getenv("WG_JMIN", "0")
+AWG_JMAX: str = os.getenv("WG_JMAX", "0")
+AWG_S1: str = os.getenv("WG_S1", "0")
+AWG_S2: str = os.getenv("WG_S2", "0")
+AWG_H1: str = os.getenv("WG_H1", "0")
+AWG_H2: str = os.getenv("WG_H2", "0")
+AWG_H3: str = os.getenv("WG_H3", "0")
+AWG_H4: str = os.getenv("WG_H4", "0")
+
 try:
     VPN_NETWORK = ipaddress.ip_network(VPN_NETWORK_STR)
 except ValueError as exc:
@@ -212,7 +223,16 @@ def download_config(profile_id: int = FPath(..., ge=1), token: str = Query(...))
         "[Interface]\n"
         f"PrivateKey = {row['private_key']}\n"
         f"Address    = {row['vpn_address']}/32\n"
-        f"DNS        = {DNS_SERVERS}\n\n"
+        f"DNS        = {DNS_SERVERS}\n"
+        f"Jc         = {AWG_JC}\n"
+        f"Jmin       = {AWG_JMIN}\n"
+        f"Jmax       = {AWG_JMAX}\n"
+        f"S1         = {AWG_S1}\n"
+        f"S2         = {AWG_S2}\n"
+        f"H1         = {AWG_H1}\n"
+        f"H2         = {AWG_H2}\n"
+        f"H3         = {AWG_H3}\n"
+        f"H4         = {AWG_H4}\n\n"
         "[Peer]\n"
         f"PublicKey         = {SERVER_PUBLIC_KEY}\n"
         f"Endpoint          = {SERVER_ENDPOINT_IP}:{SERVER_ENDPOINT_PORT}\n"

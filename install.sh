@@ -40,6 +40,17 @@ API_PORT="8080"
 WORKERS=$(( $(nproc) * 2 ))
 VENV_DIR="/opt/wg_service_venv"
 
+# Обфускационные параметры AmneziaWG (можно переопределить переменными окружения)
+AWG_JC=${AWG_JC:-20}
+AWG_JMIN=${AWG_JMIN:-40}
+AWG_JMAX=${AWG_JMAX:-80}
+AWG_S1=${AWG_S1:-40}
+AWG_S2=${AWG_S2:-40}
+AWG_H1=${AWG_H1:-$((0x$(openssl rand -hex 4)))}
+AWG_H2=${AWG_H2:-$((0x$(openssl rand -hex 4)))}
+AWG_H3=${AWG_H3:-$((0x$(openssl rand -hex 4)))}
+AWG_H4=${AWG_H4:-$((0x$(openssl rand -hex 4)))}
+
 # ------------------------------------------------------------------
 # 2. Системные зависимости
 # ------------------------------------------------------------------
@@ -47,7 +58,7 @@ echo "==> Устанавливаю системные пакеты…"
 apt update -y
 apt install -y --no-install-recommends \
   iproute2 python3-venv python3-pip mariadb-server curl unzip \
-  git golang-go
+  git golang-go openssl
 
 echo "==> Устанавливаю AmneziaWG tools…"
 AWG_URL="https://github.com/amnezia-vpn/amneziawg-tools/releases/latest/download/ubuntu-22.04-amneziawg-tools.zip"
@@ -98,6 +109,15 @@ cat >"$WG_DIR/${WG_INTERFACE}.conf" <<EOF
 Address = ${SERVER_WG_ADDR}
 ListenPort = ${SERVER_LISTEN_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
+Jc = ${AWG_JC}
+Jmin = ${AWG_JMIN}
+Jmax = ${AWG_JMAX}
+S1 = ${AWG_S1}
+S2 = ${AWG_S2}
+H1 = ${AWG_H1}
+H2 = ${AWG_H2}
+H3 = ${AWG_H3}
+H4 = ${AWG_H4}
 SaveConfig = true
 EOF
 # NAT для всей VPN-подсети
@@ -149,6 +169,17 @@ WG_CONF_DIR=${WG_DIR}
 SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
 SERVER_ENDPOINT_IP=${PUBLIC_IP}
 SERVER_ENDPOINT_PORT=${SERVER_LISTEN_PORT}
+
+# Параметры обфускации
+WG_JC=${AWG_JC}
+WG_JMIN=${AWG_JMIN}
+WG_JMAX=${AWG_JMAX}
+WG_S1=${AWG_S1}
+WG_S2=${AWG_S2}
+WG_H1=${AWG_H1}
+WG_H2=${AWG_H2}
+WG_H3=${AWG_H3}
+WG_H4=${AWG_H4}
 
 # MySQL
 MYSQL_HOST=127.0.0.1
