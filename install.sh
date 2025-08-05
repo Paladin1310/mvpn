@@ -46,7 +46,8 @@ VENV_DIR="/opt/wg_service_venv"
 echo "==> Устанавливаю системные пакеты…"
 apt update -y
 apt install -y --no-install-recommends \
-  iproute2 python3-venv python3-pip mariadb-server curl unzip
+  iproute2 python3-venv python3-pip mariadb-server curl unzip \
+  git golang-go
 
 echo "==> Устанавливаю AmneziaWG tools…"
 AWG_URL="https://github.com/amnezia-vpn/amneziawg-tools/releases/latest/download/ubuntu-22.04-amneziawg-tools.zip"
@@ -55,6 +56,11 @@ curl -L "$AWG_URL" -o "$TMP_DIR/awgtools.zip"
 unzip -q "$TMP_DIR/awgtools.zip" -d "$TMP_DIR"
 install -m 755 "$TMP_DIR"/ubuntu-22.04-amneziawg-tools/awg "$TMP_DIR"/ubuntu-22.04-amneziawg-tools/awg-quick /usr/local/bin
 rm -rf "$TMP_DIR"
+
+echo "==> Собираю userspace-бинарник amneziawg-go…"
+GO_TMP=$(mktemp -d)
+GOBIN=/usr/local/bin GOPATH="$GO_TMP" go install github.com/amnezia-vpn/amneziawg-go@latest
+rm -rf "$GO_TMP"
 
 cat >/etc/systemd/system/awg-quick@.service <<'EOF'
 [Unit]
@@ -65,6 +71,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
 ExecStart=/usr/local/bin/awg-quick up %i
 ExecStop=/usr/local/bin/awg-quick down %i
 
