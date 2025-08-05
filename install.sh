@@ -46,7 +46,33 @@ VENV_DIR="/opt/wg_service_venv"
 echo "==> Устанавливаю системные пакеты…"
 apt update -y
 apt install -y --no-install-recommends \
-  amneziawg iproute2 python3-venv python3-pip mariadb-server curl
+  iproute2 python3-venv python3-pip mariadb-server curl unzip
+
+echo "==> Устанавливаю AmneziaWG tools…"
+AWG_URL="https://github.com/amnezia-vpn/amneziawg-tools/releases/latest/download/ubuntu-22.04-amneziawg-tools.zip"
+TMP_DIR=$(mktemp -d)
+curl -L "$AWG_URL" -o "$TMP_DIR/awgtools.zip"
+unzip -q "$TMP_DIR/awgtools.zip" -d "$TMP_DIR"
+install -m 755 "$TMP_DIR"/ubuntu-22.04-amneziawg-tools/awg "$TMP_DIR"/ubuntu-22.04-amneziawg-tools/awg-quick /usr/local/bin
+rm -rf "$TMP_DIR"
+
+cat >/etc/systemd/system/awg-quick@.service <<'EOF'
+[Unit]
+Description=AmneziaWG tunnel %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/awg-quick up %i
+ExecStop=/usr/local/bin/awg-quick down %i
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
 
 # ------------------------------------------------------------------
 # 3. Настройка AmneziaWG (awg0)
@@ -71,7 +97,7 @@ iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERAD
 iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE
 
 # сохраняем (чтобы пережило перезагрузку)
-apt-get install -y iptables-persistent
+DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
 netfilter-persistent save
 
 # Включаем форвардинг
