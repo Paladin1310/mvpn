@@ -54,6 +54,7 @@ bash /tmp/xray-install.sh install >/dev/null
 KEYS=$(/usr/local/bin/xray x25519)
 XRAY_PRIVATE_KEY=$(echo "$KEYS" | sed -n 's/^Private key: //p')
 XRAY_PUBLIC_KEY=$(echo "$KEYS" | sed -n 's/^Public key: //p')
+PLACEHOLDER_SID=$(openssl rand -hex 4)
 
 # Базовый конфиг Xray
 mkdir -p /usr/local/etc/xray
@@ -77,7 +78,7 @@ cat >/usr/local/etc/xray/config.json <<EOF
           "xver": 0,
           "serverNames": ["vk.com"],
           "privateKey": "${XRAY_PRIVATE_KEY}",
-          "shortIds": []
+          "shortIds": ["${PLACEHOLDER_SID}"]
         }
       }
     }

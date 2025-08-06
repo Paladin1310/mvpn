@@ -99,7 +99,10 @@ def _run(cmd: list[str]) -> str:
         res = subprocess.run(cmd, capture_output=True, check=True)
         return res.stdout.decode().strip()
     except subprocess.CalledProcessError as exc:
-        raise HTTPException(status_code=500, detail=f"Command failed: {exc.stderr.decode().strip()}")
+        stderr = exc.stderr.decode().strip()
+        stdout = exc.stdout.decode().strip()
+        msg = stderr or stdout or "unknown error"
+        raise HTTPException(status_code=500, detail=f"Command failed: {msg}")
 
 
 def _load_config() -> dict:
@@ -239,6 +242,8 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     inbound["settings"]["clients"] = [c for c in inbound["settings"]["clients"] if c.get("id") != uuid_str]
     reality = inbound["streamSettings"]["realitySettings"]
     reality["shortIds"] = [s for s in reality.get("shortIds", []) if s != sid]
+    if not reality["shortIds"]:
+        reality["shortIds"].append(_generate_short_id())
     _save_config(cfg)
     _reload_xray()
 
