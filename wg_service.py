@@ -32,6 +32,14 @@ SERVER_PORT: int = int(os.getenv("SERVER_PORT", "443"))
 SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<pbk>")
 XRAY_CONFIG: Path = Path(os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json"))
 
+WG_INTERFACE: str = os.getenv("WG_INTERFACE", "xray")
+SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", SERVER_DOMAIN)
+SERVER_ENDPOINT_PORT: int = int(
+    os.getenv("SERVER_ENDPOINT_PORT", str(SERVER_PORT))
+)
+VPN_NETWORK: str = os.getenv("VPN_NETWORK", "")
+DNS_SERVERS: str = os.getenv("DNS_SERVERS", "")
+
 SNI = "vk.com"
 FINGERPRINT = "chrome"
 API_PORT: int = int(os.getenv("API_PORT", "8080"))
@@ -221,6 +229,7 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
 
 def send_status_update():
     profiles: list[dict] = []
+    active_ids: list[int] = []
     try:
         if not db.is_connected():
             db.reconnect()
@@ -236,10 +245,14 @@ def send_status_update():
 
     payload = {
         "api_key": API_TOKEN,
-        "server_domain": SERVER_DOMAIN,
-        "server_port": SERVER_PORT,
+        "wg_interface": WG_INTERFACE,
         "server_public_key": SERVER_PUBLIC_KEY,
+        "server_endpoint_ip": SERVER_ENDPOINT_IP,
+        "server_endpoint_port": SERVER_ENDPOINT_PORT,
+        "vpn_network": VPN_NETWORK,
+        "dns_servers": DNS_SERVERS,
         "profiles": profiles,
+        "active_profile_ids": active_ids,
     }
     try:
         print("Sending status update to mvpn.space...")
