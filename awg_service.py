@@ -1,14 +1,14 @@
-"""WireGuard Profile Management API — no accounts, one API key
-===========================================================
+"""AmneziaWG Profile Management API — no accounts, one API key
+============================================================
 Minimal FastAPI service that automates creation / listing / deletion of
-WireGuard peers while persisting data in MySQL. **No per‑user accounts or
+AmneziaWG peers while persisting data in MySQL. **No per‑user accounts or
 quotas** — a single shared `API_TOKEN` protects every endpoint.
 
 Key flow (matches the original PHP description minus auth):
 ----------------------------------------------------------------
 1. **POST /profiles** – generates key pair, picks next IP, attaches the peer via
-   `wg set`, appends a `[Peer]` block to `/etc/wireguard/wg0.conf`, stores data
-   in `wireguard_profiles`, and returns JSON with profile metadata.
+   `awg set`, appends a `[Peer]` block to `/etc/amnezia/amneziawg/awg0.conf`, stores data
+   in `awg_profiles`, and returns JSON with profile metadata.
 2. **GET /profiles** – returns the list of every existing profile.
 3. **GET /profiles/{id}/config** – produces a ready `.conf` file for the client.
 4. **DELETE /profiles/{id}** – removes the peer from interface + DB.
@@ -36,11 +36,11 @@ from pydantic import BaseModel
 
 API_TOKEN: str = os.getenv("API_TOKEN", "ReplaceMe")
 MYSQL_HOST: str = os.getenv("MYSQL_HOST", "127.0.0.1")
-MYSQL_DB: str = os.getenv("MYSQL_DB", "wg_panel")
-MYSQL_USER: str = os.getenv("MYSQL_USER", "wg_user")
-MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "wg_pass")
+MYSQL_DB: str = os.getenv("MYSQL_DB", "awg_panel")
+MYSQL_USER: str = os.getenv("MYSQL_USER", "awg_user")
+MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "awg_pass")
 
-WG_INTERFACE: str = os.getenv("WG_INTERFACE", "wg0")
+WG_INTERFACE: str = os.getenv("WG_INTERFACE", "awg0")
 SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<server‑pubkey>")
 SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", "1.2.3.4")
 SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "51830"))
@@ -49,7 +49,20 @@ VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "10.100.10.0/24")
 DNS_SERVERS: str = os.getenv("DNS_SERVERS", "8.8.8.8")
 
 LISTEN_PORT: int = int(os.getenv("API_PORT", "8080"))
-WG_CONF_PATH: Path = Path("/etc/wireguard") / f"{WG_INTERFACE}.conf"
+WG_CONF_PATH: Path = Path("/etc/amnezia/amneziawg") / f"{WG_INTERFACE}.conf"
+
+# AmneziaWG obfuscation parameters
+JC: int = int(os.getenv("JC", "5"))
+JMIN: int = int(os.getenv("JMIN", "500"))
+JMAX: int = int(os.getenv("JMAX", "1000"))
+S1: int = int(os.getenv("S1", "30"))
+S2: int = int(os.getenv("S2", "40"))
+S3: int = int(os.getenv("S3", "50"))
+S4: int = int(os.getenv("S4", "5"))
+H1: int = int(os.getenv("H1", "123456"))
+H2: int = int(os.getenv("H2", "67543"))
+H3: int = int(os.getenv("H3", "123123"))
+H4: int = int(os.getenv("H4", "32345"))
 
 try:
     VPN_NETWORK = ipaddress.ip_network(VPN_NETWORK_STR)
@@ -71,7 +84,7 @@ db = mysql.connector.connect(
 with db.cursor() as cur:
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS wireguard_profiles (
+        CREATE TABLE IF NOT EXISTS awg_profiles (
             id INT PRIMARY KEY AUTO_INCREMENT,
             private_key TEXT NOT NULL,
             public_key TEXT NOT NULL,
@@ -85,7 +98,7 @@ with db.cursor() as cur:
 # FASTAPI APP
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="WireGuard API", version="3.0.0")
+app = FastAPI(title="AmneziaWG API", version="3.0.0")
 
 # ---------------------------------------------------------------------------
 # UTILS
@@ -110,15 +123,15 @@ def _run(cmd: list[str], *, input_: str | None = None) -> str:
 
 
 def _generate_keys() -> tuple[str, str]:
-    priv = _run(["wg", "genkey"])
-    pub = _run(["wg", "pubkey"], input_=priv)
+    priv = _run(["awg", "genkey"])
+    pub = _run(["awg", "pubkey"], input_=priv)
     return priv, pub
 
 
 def _next_ip() -> str:
     """Return next unused /32 inside VPN_NETWORK."""
     with db.cursor() as cur:
-        cur.execute("SELECT vpn_address FROM wireguard_profiles ORDER BY id DESC LIMIT 1")
+        cur.execute("SELECT vpn_address FROM awg_profiles ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
     if row:
         next_ip = ipaddress.ip_address(row[0]) + 1
@@ -131,11 +144,11 @@ def _next_ip() -> str:
 
 
 def _attach_peer(pubkey: str, ip_: str):
-    _run(["wg", "set", WG_INTERFACE, "peer", pubkey, "allowed-ips", f"{ip_}/32"])
+    _run(["awg", "set", WG_INTERFACE, "peer", pubkey, "allowed-ips", f"{ip_}/32"])
 
 
 def _remove_peer(pubkey: str):
-    _run(["wg", "set", WG_INTERFACE, "peer", pubkey, "remove"])
+    _run(["awg", "set", WG_INTERFACE, "peer", pubkey, "remove"])
 
 
 def _append_conf_block(pubkey: str, ip_: str):
@@ -158,7 +171,7 @@ class ProfileOut(BaseModel):
 
 @app.post("/profiles", response_model=ProfileOut)
 def create_profile(token: str = Query(...)):
-    """Create a new WireGuard profile."""
+    """Create a new AmneziaWG profile."""
 
     _require_token(token)
 
@@ -169,17 +182,17 @@ def create_profile(token: str = Query(...)):
     # Attach immediately
     _attach_peer(pub, ip_str)
 
-    # Append to wg0.conf
+    # Append to awg0.conf
     try:
         _append_conf_block(pub, ip_str)
     except Exception as exc:
         _remove_peer(pub)
-        raise HTTPException(status_code=500, detail=f"Failed to write wg0.conf: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to write awg0.conf: {exc}")
 
     # DB insert
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO wireguard_profiles (private_key, public_key, vpn_address, created_at) VALUES (%s, %s, %s, %s)",
+            "INSERT INTO awg_profiles (private_key, public_key, vpn_address, created_at) VALUES (%s, %s, %s, %s)",
             (priv, pub, ip_str, now),
         )
         profile_id = cur.lastrowid
@@ -192,7 +205,7 @@ def create_profile(token: str = Query(...)):
 def list_profiles(token: str = Query(...)):
     _require_token(token)
     with db.cursor(dictionary=True) as cur:
-        cur.execute("SELECT id, vpn_address, created_at FROM wireguard_profiles")
+        cur.execute("SELECT id, vpn_address, created_at FROM awg_profiles")
         return cur.fetchall()
 
 
@@ -201,7 +214,7 @@ def download_config(profile_id: int = FPath(..., ge=1), token: str = Query(...))
     _require_token(token)
 
     with db.cursor(dictionary=True) as cur:
-        cur.execute("SELECT vpn_address, private_key FROM wireguard_profiles WHERE id=%s", (profile_id,))
+        cur.execute("SELECT vpn_address, private_key FROM awg_profiles WHERE id=%s", (profile_id,))
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -210,7 +223,18 @@ def download_config(profile_id: int = FPath(..., ge=1), token: str = Query(...))
         "[Interface]\n"
         f"PrivateKey = {row['private_key']}\n"
         f"Address    = {row['vpn_address']}/32\n"
-        f"DNS        = {DNS_SERVERS}\n\n"
+        f"DNS        = {DNS_SERVERS}\n"
+        f"Jc         = {JC}\n"
+        f"Jmin       = {JMIN}\n"
+        f"Jmax       = {JMAX}\n"
+        f"S1         = {S1}\n"
+        f"S2         = {S2}\n"
+        f"S3         = {S3}\n"
+        f"S4         = {S4}\n"
+        f"H1         = {H1}\n"
+        f"H2         = {H2}\n"
+        f"H3         = {H3}\n"
+        f"H4         = {H4}\n\n"
         "[Peer]\n"
         f"PublicKey         = {SERVER_PUBLIC_KEY}\n"
         f"Endpoint          = {SERVER_ENDPOINT_IP}:{SERVER_ENDPOINT_PORT}\n"
@@ -220,7 +244,7 @@ def download_config(profile_id: int = FPath(..., ge=1), token: str = Query(...))
 
     headers = {
         "Content-Type": "application/octet-stream",
-        "Content-Disposition": f"attachment; filename=wg-profile-{row['vpn_address']}.conf",
+        "Content-Disposition": f"attachment; filename=awg-profile-{row['vpn_address']}.conf",
     }
     return Response(content=conf, media_type="application/octet-stream", headers=headers)
 
@@ -230,7 +254,7 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     _require_token(token)
 
     with db.cursor(dictionary=True) as cur:
-        cur.execute("SELECT public_key FROM wireguard_profiles WHERE id=%s", (profile_id,))
+        cur.execute("SELECT public_key FROM awg_profiles WHERE id=%s", (profile_id,))
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -239,7 +263,7 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     _remove_peer(pub)
 
     with db.cursor() as cur:
-        cur.execute("DELETE FROM wireguard_profiles WHERE id=%s", (profile_id,))
+        cur.execute("DELETE FROM awg_profiles WHERE id=%s", (profile_id,))
     db.commit()
 
     return {"status": "deleted", "profile_id": profile_id}
@@ -259,7 +283,7 @@ def send_status_update():
             db.reconnect()
 
         with db.cursor(dictionary=True) as cur:
-            cur.execute("SELECT id, vpn_address, public_key, created_at FROM wireguard_profiles ORDER BY id")
+            cur.execute("SELECT id, vpn_address, public_key, created_at FROM awg_profiles ORDER BY id")
             db_profiles = cur.fetchall()
 
         # Map of public_key -> profile id for quick lookup
@@ -275,7 +299,7 @@ def send_status_update():
 
         # Retrieve handshake info for peers
         try:
-            dump = _run(["wg", "show", WG_INTERFACE, "dump"]).splitlines()
+            dump = _run(["awg", "show", WG_INTERFACE, "dump"]).splitlines()
             handshakes = {}
             for line in dump[1:]:
                 parts = line.split("\t")
@@ -295,7 +319,7 @@ def send_status_update():
 
     payload = {
         "api_key": API_TOKEN,
-        "wg_interface": WG_INTERFACE,
+        "awg_interface": WG_INTERFACE,
         "server_public_key": SERVER_PUBLIC_KEY,
         "server_endpoint_ip": SERVER_ENDPOINT_IP,
         "server_endpoint_port": SERVER_ENDPOINT_PORT,
@@ -340,4 +364,4 @@ if __name__ == "__main__":
     import uvicorn
 
     # The on_startup event now handles the background thread.
-    uvicorn.run("wg_service:app", host="0.0.0.0", port=LISTEN_PORT, reload=True)
+    uvicorn.run("awg_service:app", host="0.0.0.0", port=LISTEN_PORT, reload=True)
