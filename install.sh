@@ -138,7 +138,7 @@ cat >"$SERVICE_FILE" <<EOF
 [Unit]
 Description=Xray VLESS Profile API (via virtualenv)
 After=network.target mariadb.service xray.service
-Requires=xray.service
+Wants=xray.service
 
 [Service]
 Type=simple

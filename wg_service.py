@@ -101,7 +101,7 @@ def _run(cmd: list[str]) -> str:
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode().strip()
         stdout = exc.stdout.decode().strip()
-        msg = stderr or stdout or "unknown error"
+        msg = stderr or stdout or f"exit code {exc.returncode}"
         raise HTTPException(status_code=500, detail=f"Command failed: {msg}")
 
 
@@ -118,7 +118,7 @@ def _save_config(cfg: dict) -> None:
 
 
 def _reload_xray() -> None:
-    _run(["systemctl", "restart", "xray"])
+    _run(["systemctl", "reload", "xray"])
 
 
 def _generate_uuid() -> str:
