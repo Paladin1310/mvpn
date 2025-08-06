@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# install_wg_service.sh — быстрый деплой /opt/wg_service.py + wg0 + MySQL на Ubuntu 24.04
+# install.sh — быстрый деплой Xray (VLESS+Reality) и FastAPI-сервиса управления клиентами
+# Работает на свежей Ubuntu 24.04
 
 set -euo pipefail
 
@@ -11,9 +12,9 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-WG_SERVICE_FILE="/opt/wg_service.py"
-if [[ ! -f "$WG_SERVICE_FILE" ]]; then
-  echo "Файл $WG_SERVICE_FILE не найден. Скопируйте его перед запуском." >&2
+SERVICE_FILE_ON_DISK="/opt/wg_service.py"
+if [[ ! -f "$SERVICE_FILE_ON_DISK" ]]; then
+  echo "Файл $SERVICE_FILE_ON_DISK не найден. Скопируйте его перед запуском." >&2
   exit 1
 fi
 
@@ -21,22 +22,17 @@ PUBLIC_IP="${1:-}"
 if [[ -z "$PUBLIC_IP" ]]; then
   PUBLIC_IP=$(curl -s https://api.ipify.org || true)
   [[ -z "$PUBLIC_IP" ]] && {
-    echo "Укажите внешний IP: ./install_wg_service.sh <PUBLIC_IP>" >&2
+    echo "Укажите публичный IP или домен: ./install.sh <PUBLIC_IP>" >&2
     exit 1
   }
 fi
 
-# WireGuard — серверные параметры
-SERVER_WG_ADDR="10.100.10.1/24"   # та же /24, что и VPN_NETWORK в сервисе
-SERVER_LISTEN_PORT="51820"
-
-# Генерируем секреты / переменные окружения
+XRAY_PORT="443"
+API_PORT="8080"
 API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
-MYSQL_USER="wg_user"
-MYSQL_DB="wg_panel"
-WG_INTERFACE="wg0"
-API_PORT="8080"
+MYSQL_USER="xray_user"
+MYSQL_DB="xray_panel"
 WORKERS=$(( $(nproc) * 2 ))
 VENV_DIR="/opt/wg_service_venv"
 
@@ -45,41 +41,53 @@ VENV_DIR="/opt/wg_service_venv"
 # ------------------------------------------------------------------
 echo "==> Устанавливаю системные пакеты…"
 apt update -y
-apt install -y --no-install-recommends \
-  wireguard iproute2 python3-venv python3-pip mariadb-server curl
+apt install -y --no-install-recommends python3-venv python3-pip mariadb-server curl unzip
 
 # ------------------------------------------------------------------
-# 3. Настройка WireGuard (wg0)
+# 3. Установка Xray Core
 # ------------------------------------------------------------------
-echo "==> Настраиваю интерфейс WireGuard ${WG_INTERFACE}…"
-mkdir -p /etc/wireguard
-umask 077
-[[ -f /etc/wireguard/server_private.key ]] || wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
-SERVER_PRIV_KEY=$(cat /etc/wireguard/server_private.key)
-SERVER_PUB_KEY=$(cat /etc/wireguard/server_public.key)
+echo "==> Устанавливаю Xray…"
+curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o /tmp/xray-install.sh
+bash /tmp/xray-install.sh install >/dev/null
 
-cat >/etc/wireguard/${WG_INTERFACE}.conf <<EOF
-[Interface]
-Address = ${SERVER_WG_ADDR}
-ListenPort = ${SERVER_LISTEN_PORT}
-PrivateKey = ${SERVER_PRIV_KEY}
-SaveConfig = true
+# Генерируем ключи Reality
+KEYS=$(/usr/local/bin/xray x25519)
+XRAY_PRIVATE_KEY=$(echo "$KEYS" | sed -n 's/^Private key: //p')
+XRAY_PUBLIC_KEY=$(echo "$KEYS" | sed -n 's/^Public key: //p')
+PLACEHOLDER_SID=$(openssl rand -hex 4)
+
+# Базовый конфиг Xray
+mkdir -p /usr/local/etc/xray
+cat >/usr/local/etc/xray/config.json <<EOF
+{
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": ${XRAY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.cloudflare.com:443",
+          "xver": 0,
+          "serverNames": ["vk.com"],
+          "privateKey": "${XRAY_PRIVATE_KEY}",
+          "shortIds": ["${PLACEHOLDER_SID}"]
+        }
+      }
+    }
+  ]
+}
 EOF
-# NAT для всей VPN-подсети
-MAIN_INTERFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-iptables -t nat -C POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s 10.100.10.0/24 -o $MAIN_INTERFACE -j MASQUERADE
 
-# сохраняем (чтобы пережило перезагрузку)
-apt-get install -y iptables-persistent
-netfilter-persistent save
-
-# Включаем форвардинг
-sysctl -w net.ipv4.ip_forward=1
-grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-
-# Поднимаем интерфейс
-systemctl enable --now wg-quick@${WG_INTERFACE}
+systemctl enable xray
+systemctl restart xray
 
 # ------------------------------------------------------------------
 # 4. MariaDB / MySQL
@@ -103,15 +111,16 @@ deactivate
 # ------------------------------------------------------------------
 # 6. Env-файл для API
 # ------------------------------------------------------------------
-cat >/etc/wg-service.env <<EOF
+cat >/etc/xray-service.env <<EOF
 API_TOKEN=${API_TOKEN}
-WG_INTERFACE=${WG_INTERFACE}
 API_PORT=${API_PORT}
-
-# Сетевые данные сервера WG (для клиентских конфигов)
-SERVER_PUBLIC_KEY=${SERVER_PUB_KEY}
-SERVER_ENDPOINT_IP=${PUBLIC_IP}
-SERVER_ENDPOINT_PORT=${SERVER_LISTEN_PORT}
+XRAY_CONFIG_PATH=/usr/local/etc/xray/config.json
+XRAY_BINARY=/usr/local/bin/xray
+SERVER_PUBLIC_KEY=${XRAY_PUBLIC_KEY}
+SERVER_DOMAIN=${PUBLIC_IP}
+SERVER_PORT=${XRAY_PORT}
+SNI=vk.com
+FP=chrome
 
 # MySQL
 MYSQL_HOST=127.0.0.1
@@ -119,22 +128,21 @@ MYSQL_DB=${MYSQL_DB}
 MYSQL_USER=${MYSQL_USER}
 MYSQL_PASSWORD=${MYSQL_PASSWORD}
 EOF
-chmod 600 /etc/wg-service.env
+chmod 600 /etc/xray-service.env
 
 # ------------------------------------------------------------------
-# 7. systemd-юнит
+# 7. systemd-юнит для FastAPI
 # ------------------------------------------------------------------
-SERVICE_FILE=/etc/systemd/system/wg-service.service
+SERVICE_FILE=/etc/systemd/system/xray-service.service
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=WireGuard Profile API (via virtualenv)
-After=network.target mariadb.service wg-quick@${WG_INTERFACE}.service
-Requires=wg-quick@${WG_INTERFACE}.service
+Description=Xray VLESS Profile API (via virtualenv)
+After=network.target mariadb.service xray.service
+Wants=xray.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/wg-service.env
-# uvicorn запускает wg_service:app
+EnvironmentFile=/etc/xray-service.env
 ExecStart=${VENV_DIR}/bin/uvicorn wg_service:app --host 0.0.0.0 --port \${API_PORT} --workers ${WORKERS}
 WorkingDirectory=/opt
 Restart=always
@@ -146,13 +154,13 @@ EOF
 
 chmod 644 "$SERVICE_FILE"
 systemctl daemon-reload
-systemctl enable --now wg-service.service
+systemctl enable --now xray-service.service
 
 # ------------------------------------------------------------------
 # 8. Фаервол (UFW) — опционально
 # ------------------------------------------------------------------
 if command -v ufw >/dev/null; then
-  ufw allow ${SERVER_LISTEN_PORT}/udp || true
+  ufw allow ${XRAY_PORT}/tcp || true
 fi
 
 # ------------------------------------------------------------------
@@ -160,12 +168,13 @@ fi
 # ------------------------------------------------------------------
 echo "------------------------------------------------------------"
 echo "✅  Установка завершена."
-echo "   WireGuard интерфейс: ${WG_INTERFACE} (${SERVER_WG_ADDR}, порт ${SERVER_LISTEN_PORT}/udp)"
+echo "   Xray слушает: ${PUBLIC_IP}:${XRAY_PORT} (Reality/VLESS)"
+echo "   Публичный ключ: ${XRAY_PUBLIC_KEY}"
 echo "   API слушает: http://${PUBLIC_IP}:${API_PORT}"
 echo "   Токен: ${API_TOKEN}"
 echo
-echo "   Пример запроса (создать профиль для user_id=1):"
-echo "     curl -X POST \"http://${PUBLIC_IP}:${API_PORT}/profiles?token=${API_TOKEN}&user_id=1\""
+echo "   Пример запроса (создать профиль):"
+echo "     curl -X POST \"http://${PUBLIC_IP}:${API_PORT}/profiles?token=${API_TOKEN}\""
 echo
-echo "   Логи: journalctl -u wg-service -f"
+echo "   Логи: journalctl -u xray-service -f"
 echo "------------------------------------------------------------"
