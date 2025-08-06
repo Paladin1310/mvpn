@@ -149,7 +149,7 @@ After=network.target mariadb.service xray.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/wg-service.env
-ExecStart=VENV_DIR_REPLACE/bin/uvicorn wg_service:app --host 0.0.0.0 --port \${API_PORT} --workers WORKERS_REPLACE
+ExecStart=VENV_DIR_REPLACE/bin/uvicorn wg_service:app --host 0.0.0.0 --port ${API_PORT} --workers WORKERS_REPLACE
 WorkingDirectory=/opt
 Restart=always
 RestartSec=5
