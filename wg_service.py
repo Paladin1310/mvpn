@@ -117,8 +117,8 @@ def _save_config(cfg: dict) -> None:
     os.replace(tmp, XRAY_CONFIG_PATH)
 
 
-def _reload_xray() -> None:
-    _run(["systemctl", "reload", "xray"])
+def _restart_xray() -> None:
+    _run(["systemctl", "restart", "xray"])
 
 
 def _generate_uuid() -> str:
@@ -167,7 +167,7 @@ def create_profile(token: str = Query(...), label: str | None = Query(default=No
     inbound["settings"]["clients"].append({"id": uuid_str, "flow": "xtls-rprx-vision", "email": label})
     inbound["streamSettings"]["realitySettings"]["shortIds"].append(sid)
     _save_config(cfg)
-    _reload_xray()
+    _restart_xray()
 
     with db.cursor() as cur:
         cur.execute(
@@ -245,7 +245,7 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     if not reality["shortIds"]:
         reality["shortIds"].append(_generate_short_id())
     _save_config(cfg)
-    _reload_xray()
+    _restart_xray()
 
     with db.cursor() as cur:
         cur.execute("DELETE FROM vless_profiles WHERE id=%s", (profile_id,))
