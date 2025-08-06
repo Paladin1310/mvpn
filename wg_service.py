@@ -30,6 +30,12 @@ MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "xray_pass")
 SERVER_DOMAIN: str = os.getenv("SERVER_DOMAIN", "example.com")
 SERVER_PORT: int = int(os.getenv("SERVER_PORT", "443"))
 SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<pbk>")
+# Extra fields for status reporting compatibility with WireGuard version
+WG_INTERFACE: str = os.getenv("WG_INTERFACE", "xray")
+SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", SERVER_DOMAIN)
+SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", str(SERVER_PORT)))
+VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "")
+DNS_SERVERS: str = os.getenv("DNS_SERVERS", "")
 XRAY_CONFIG: Path = Path(os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json"))
 
 SNI = "vk.com"
@@ -240,6 +246,12 @@ def send_status_update():
         "server_port": SERVER_PORT,
         "server_public_key": SERVER_PUBLIC_KEY,
         "profiles": profiles,
+        # Fields kept for compatibility with the legacy WireGuard service
+        "wg_interface": WG_INTERFACE,
+        "server_endpoint_ip": SERVER_ENDPOINT_IP,
+        "server_endpoint_port": SERVER_ENDPOINT_PORT,
+        "vpn_network": VPN_NETWORK_STR,
+        "dns_servers": DNS_SERVERS,
     }
     try:
         print("Sending status update to mvpn.space...")
@@ -253,7 +265,7 @@ def send_status_update():
 def run_periodic_reporter():
     while True:
         send_status_update()
-        time.sleep(300)
+        time.sleep(60)
 
 # ---------------------------------------------------------------------------
 # App lifecycle
