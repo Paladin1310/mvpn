@@ -30,7 +30,8 @@ MYSQL_USER: str = os.getenv("MYSQL_USER", "ovpn_user")
 MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "ovpn_pass")
 
 SERVER_ENDPOINT_IP: str = os.getenv("SERVER_ENDPOINT_IP", "1.2.3.4")
-SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "1194"))
+# Default OpenVPN server port
+SERVER_ENDPOINT_PORT: int = int(os.getenv("SERVER_ENDPOINT_PORT", "21"))
 DNS_SERVERS: str = os.getenv("DNS_SERVERS", "8.8.8.8")
 
 EASYRSA_DIR: Path = Path(os.getenv("EASYRSA_DIR", "/etc/openvpn/easy-rsa"))

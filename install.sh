@@ -27,7 +27,8 @@ if [[ -z "$PUBLIC_IP" ]]; then
 fi
 
 SERVER_NETWORK="10.100.10.0 255.255.255.0"
-SERVER_PORT="1194"
+# Default OpenVPN listening port
+SERVER_PORT="21"
 
 API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
