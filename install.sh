@@ -30,6 +30,7 @@ API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
 MYSQL_USER="xray_user"
 MYSQL_DB="xray_panel"
+MYSQL_TEMP_DB="xray_temp"
 API_PORT="8080"
 XRAY_PORT="443"
 VENV_DIR="/opt/xray_service_venv"
@@ -99,6 +100,9 @@ systemctl enable --now mariadb
 mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
 mysql -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
+# Temp DB (отдельная база для временных профилей)
+mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_TEMP_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -e "GRANT ALL PRIVILEGES ON \`$MYSQL_TEMP_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
 
 # ------------------------------------------------------------------
 # 5. Python-виртуальное окружение
@@ -125,6 +129,12 @@ MYSQL_HOST=127.0.0.1
 MYSQL_DB=MYSQL_DB_REPLACE
 MYSQL_USER=MYSQL_USER_REPLACE
 MYSQL_PASSWORD=MYSQL_PASSWORD_REPLACE
+
+# Separate DB for temporary profiles (опционально можно переопределить)
+TEMP_MYSQL_HOST=127.0.0.1
+TEMP_MYSQL_DB=MYSQL_TEMP_DB_REPLACE
+TEMP_MYSQL_USER=MYSQL_USER_REPLACE
+TEMP_MYSQL_PASSWORD=MYSQL_PASSWORD_REPLACE
 ENV
 sed -i "s/API_TOKEN_REPLACE/$API_TOKEN/" /etc/wg-service.env
 sed -i "s/API_PORT_REPLACE/$API_PORT/" /etc/wg-service.env
@@ -135,6 +145,7 @@ sed -i "s|XRAY_CONFIG_REPLACE|$XRAY_CONFIG|" /etc/wg-service.env
 sed -i "s/MYSQL_DB_REPLACE/$MYSQL_DB/" /etc/wg-service.env
 sed -i "s/MYSQL_USER_REPLACE/$MYSQL_USER/" /etc/wg-service.env
 sed -i "s/MYSQL_PASSWORD_REPLACE/$MYSQL_PASSWORD/" /etc/wg-service.env
+sed -i "s/MYSQL_TEMP_DB_REPLACE/$MYSQL_TEMP_DB/" /etc/wg-service.env || true
 chmod 600 /etc/wg-service.env
 
 # ------------------------------------------------------------------
@@ -183,6 +194,9 @@ cat <<INFO
 
    Пример запроса (создать профиль):
      curl -X POST "http://$SERVER_ADDRESS:$API_PORT/profiles?token=$API_TOKEN"
+
+   Временный профиль (1 день):
+     curl -X POST "http://$SERVER_ADDRESS:$API_PORT/temp-profiles?token=$API_TOKEN"
 
    Логи: journalctl -у wg-service -f
 ------------------------------------------------------------

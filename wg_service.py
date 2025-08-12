@@ -27,6 +27,12 @@ MYSQL_DB: str = os.getenv("MYSQL_DB", "xray_panel")
 MYSQL_USER: str = os.getenv("MYSQL_USER", "xray_user")
 MYSQL_PASS: str = os.getenv("MYSQL_PASSWORD", "xray_pass")
 
+# Separate DB for temporary profiles
+TEMP_MYSQL_HOST: str = os.getenv("TEMP_MYSQL_HOST", MYSQL_HOST)
+TEMP_MYSQL_DB: str = os.getenv("TEMP_MYSQL_DB", "xray_temp")
+TEMP_MYSQL_USER: str = os.getenv("TEMP_MYSQL_USER", MYSQL_USER)
+TEMP_MYSQL_PASS: str = os.getenv("TEMP_MYSQL_PASSWORD", MYSQL_PASS)
+
 SERVER_DOMAIN: str = os.getenv("SERVER_DOMAIN", "example.com")
 SERVER_PORT: int = int(os.getenv("SERVER_PORT", "443"))
 SERVER_PUBLIC_KEY: str = os.getenv("SERVER_PUBLIC_KEY", "<pbk>")
@@ -45,13 +51,9 @@ API_PORT: int = int(os.getenv("API_PORT", "8080"))
 # ---------------------------------------------------------------------------
 # Database initialisation
 # ---------------------------------------------------------------------------
-db = mysql.connector.connect(
-    host=MYSQL_HOST,
-    user=MYSQL_USER,
-    password=MYSQL_PASS,
-    database=MYSQL_DB,
-    autocommit=True,
-)
+# Main DB
+_db_connect_kwargs = dict(host=MYSQL_HOST, user=MYSQL_USER, password=MYSQL_PASS, database=MYSQL_DB, autocommit=True)
+db = mysql.connector.connect(**_db_connect_kwargs)
 
 with db.cursor() as cur:
     cur.execute(
@@ -61,6 +63,58 @@ with db.cursor() as cur:
             uuid CHAR(36) NOT NULL UNIQUE,
             short_id VARCHAR(16) NOT NULL UNIQUE,
             created_at DATETIME NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+
+# Temporary DB (separate database)
+
+def _ensure_temp_database_and_connect() -> mysql.connector.connection.MySQLConnection:
+    try:
+        return mysql.connector.connect(
+            host=TEMP_MYSQL_HOST,
+            user=TEMP_MYSQL_USER,
+            password=TEMP_MYSQL_PASS,
+            database=TEMP_MYSQL_DB,
+            autocommit=True,
+        )
+    except mysql.connector.Error as exc:
+        # Attempt to create the database if it doesn't exist
+        try:
+            admin_conn = mysql.connector.connect(
+                host=TEMP_MYSQL_HOST,
+                user=TEMP_MYSQL_USER,
+                password=TEMP_MYSQL_PASS,
+                autocommit=True,
+            )
+            with admin_conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{TEMP_MYSQL_DB}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci")
+            admin_conn.close()
+            # Reconnect to the created DB
+            return mysql.connector.connect(
+                host=TEMP_MYSQL_HOST,
+                user=TEMP_MYSQL_USER,
+                password=TEMP_MYSQL_PASS,
+                database=TEMP_MYSQL_DB,
+                autocommit=True,
+            )
+        except mysql.connector.Error as inner_exc:
+            print(f"Failed to create/connect temporary DB: {inner_exc}", file=sys.stderr)
+            raise
+
+
+temp_db = _ensure_temp_database_and_connect()
+
+with temp_db.cursor() as cur:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS temp_vless_profiles (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            uuid CHAR(36) NOT NULL UNIQUE,
+            short_id VARCHAR(16) NOT NULL UNIQUE,
+            created_at DATETIME NOT NULL,
+            expires_at DATETIME NOT NULL,
+            INDEX (expires_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """
     )
@@ -151,6 +205,14 @@ class ProfileOut(BaseModel):
     short_id: str
     created_at: datetime.datetime
 
+
+class TempProfileOut(BaseModel):
+    id: int
+    uuid: str
+    short_id: str
+    created_at: datetime.datetime
+    expires_at: datetime.datetime
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -221,9 +283,136 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
 
     return {"status": "deleted", "profile_id": profile_id}
 
+# -------------------- Temporary profiles (separate DB) ----------------------
+
+@app.post("/temp-profiles", response_model=TempProfileOut)
+def create_temp_profile(token: str = Query(...)):
+    _require_token(token)
+    uuid_ = _generate_uuid()
+    short_id = _generate_short_id()
+    now = datetime.datetime.utcnow()
+    expires_at = now + datetime.timedelta(days=1)
+
+    _add_client(uuid_, short_id)
+
+    if not temp_db.is_connected():
+        temp_db.reconnect()
+
+    with temp_db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO temp_vless_profiles (uuid, short_id, created_at, expires_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (uuid_, short_id, now, expires_at),
+        )
+        temp_id = cur.lastrowid
+    temp_db.commit()
+
+    return TempProfileOut(
+        id=temp_id, uuid=uuid_, short_id=short_id, created_at=now, expires_at=expires_at
+    )
+
+
+@app.get("/temp-profiles", response_model=List[TempProfileOut])
+def list_temp_profiles(token: str = Query(...)):
+    _require_token(token)
+    if not temp_db.is_connected():
+        temp_db.reconnect()
+    with temp_db.cursor(dictionary=True) as cur:
+        cur.execute(
+            "SELECT id, uuid, short_id, created_at, expires_at FROM temp_vless_profiles ORDER BY id"
+        )
+        return cur.fetchall()
+
+
+@app.get(
+    "/temp-profiles/{temp_id}/config",
+    response_class=Response,
+    responses={200: {"content": {"text/plain": {}}}},
+)
+def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...)):
+    _require_token(token)
+    if not temp_db.is_connected():
+        temp_db.reconnect()
+    with temp_db.cursor(dictionary=True) as cur:
+        cur.execute(
+            "SELECT uuid, short_id, expires_at FROM temp_vless_profiles WHERE id=%s",
+            (temp_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Temp profile not found")
+    if isinstance(row.get("expires_at"), datetime.datetime) and row["expires_at"] <= datetime.datetime.utcnow():
+        # Expired: remove and report 404
+        try:
+            _remove_client(row["uuid"], row["short_id"])
+        finally:
+            if not temp_db.is_connected():
+                temp_db.reconnect()
+            with temp_db.cursor() as cur:
+                cur.execute("DELETE FROM temp_vless_profiles WHERE id=%s", (temp_id,))
+            temp_db.commit()
+        raise HTTPException(status_code=404, detail="Temp profile expired")
+
+    link = _build_link(row["uuid"], row["short_id"], f"temp-{temp_id}")
+    return Response(content=link, media_type="text/plain")
+
+
+@app.delete("/temp-profiles/{temp_id}")
+def delete_temp_profile(temp_id: int = FPath(..., ge=1), token: str = Query(...)):
+    _require_token(token)
+    if not temp_db.is_connected():
+        temp_db.reconnect()
+    with temp_db.cursor(dictionary=True) as cur:
+        cur.execute(
+            "SELECT uuid, short_id FROM temp_vless_profiles WHERE id=%s",
+            (temp_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Temp profile not found")
+
+    _remove_client(row["uuid"], row["short_id"])
+
+    if not temp_db.is_connected():
+        temp_db.reconnect()
+    with temp_db.cursor() as cur:
+        cur.execute("DELETE FROM temp_vless_profiles WHERE id=%s", (temp_id,))
+    temp_db.commit()
+
+    return {"status": "deleted", "temp_profile_id": temp_id}
+
 # ---------------------------------------------------------------------------
-# Periodic status reporting
+# Periodic status reporting and temp cleanup
 # ---------------------------------------------------------------------------
+
+def cleanup_expired_temp_profiles():
+    try:
+        if not temp_db.is_connected():
+            temp_db.reconnect()
+        # Find all expired
+        with temp_db.cursor(dictionary=True) as cur:
+            cur.execute(
+                "SELECT id, uuid, short_id FROM temp_vless_profiles WHERE expires_at <= UTC_TIMESTAMP()"
+            )
+            expired = cur.fetchall()
+        for row in expired:
+            try:
+                _remove_client(row["uuid"], row["short_id"])
+            except HTTPException as exc:
+                print(f"Failed to remove expired temp client from xray: {exc}", file=sys.stderr)
+            try:
+                if not temp_db.is_connected():
+                    temp_db.reconnect()
+                with temp_db.cursor() as cur:
+                    cur.execute("DELETE FROM temp_vless_profiles WHERE id=%s", (row["id"],))
+                temp_db.commit()
+            except mysql.connector.Error as exc:
+                print(f"Failed to delete expired temp profile from DB: {exc}", file=sys.stderr)
+    except mysql.connector.Error as exc:
+        print(f"Temp DB cleanup error: {exc}", file=sys.stderr)
+
 
 def send_status_update():
     profiles: list[dict] = []
@@ -264,6 +453,8 @@ def send_status_update():
 
 def run_periodic_reporter():
     while True:
+        # Clean up expired temporary profiles on each tick
+        cleanup_expired_temp_profiles()
         send_status_update()
         time.sleep(60)
 
