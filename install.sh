@@ -111,7 +111,7 @@ echo "==> Создаю Python-venv…"
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
-pip install fastapi "uvicorn[standard]" python-dotenv mysql-connector-python requests
+pip install fastapi "uvicorn[standard]" python-dotenv mysql-connector-python requests psutil
 deactivate
 
 # ------------------------------------------------------------------
@@ -198,6 +198,6 @@ cat <<INFO
    Временный профиль (1 день):
      curl -X POST "http://$SERVER_ADDRESS:$API_PORT/temp-profiles?token=$API_TOKEN"
 
-   Логи: journalctl -у wg-service -f
+   Логи: journalctl -у wg-service -ф
 ------------------------------------------------------------
 INFO

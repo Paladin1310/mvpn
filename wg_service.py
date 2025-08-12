@@ -18,6 +18,14 @@ import requests
 from fastapi import FastAPI, HTTPException, Query, Response, Path as FPath
 from pydantic import BaseModel
 
+# Try to use psutil for accurate CPU percent
+try:
+    import psutil  # type: ignore
+    _HAS_PSUTIL = True
+except Exception:  # noqa: BLE001
+    psutil = None  # type: ignore
+    _HAS_PSUTIL = False
+
 # ---------------------------------------------------------------------------
 # Environment variables
 # ---------------------------------------------------------------------------
@@ -195,6 +203,27 @@ def _build_link(uuid_: str, short_id: str, label: str) -> str:
         "flow": "xtls-rprx-vision",
     }
     return f"vless://{uuid_}@{SERVER_DOMAIN}:{SERVER_PORT}?{urlencode(params)}#{label}"
+
+
+def _get_cpu_percent() -> float:
+    if _HAS_PSUTIL and psutil is not None:
+        try:
+            # Short sampling to estimate current CPU percent
+            return float(psutil.cpu_percent(interval=0.2))
+        except Exception:  # noqa: BLE001
+            pass
+    # Fallback: approximate via 1-min load average
+    try:
+        la1, _la5, _la15 = os.getloadavg()
+        num_cpus = os.cpu_count() or 1
+        percent = (la1 / float(num_cpus)) * 100.0
+        if percent < 0:
+            percent = 0.0
+        if percent > 100.0:
+            percent = 100.0
+        return float(percent)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -441,6 +470,8 @@ def send_status_update():
         "server_endpoint_port": SERVER_ENDPOINT_PORT,
         "vpn_network": VPN_NETWORK_STR,
         "dns_servers": DNS_SERVERS,
+        # New: CPU usage percent
+        "cpu_percent": _get_cpu_percent(),
     }
     try:
         print("Sending status update to mvpn.space...")
