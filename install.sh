@@ -107,6 +107,8 @@ echo "==> Настраиваю MariaDB…"
 systemctl enable --now mariadb
 mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
+# На случай повторной установки — принудительно обновляем пароль
+mysql -e "ALTER USER '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
 mysql -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
 # Temp DB (отдельная база для временных профилей)
 mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_TEMP_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
@@ -190,6 +192,7 @@ systemctl enable --now wg-service.service
 # ------------------------------------------------------------------
 if command -v ufw >/dev/null; then
   ufw allow $XRAY_PORT/tcp || true
+  ufw allow $API_PORT/tcp || true
 fi
 
 # ------------------------------------------------------------------
