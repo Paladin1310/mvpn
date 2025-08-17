@@ -95,3 +95,5 @@ if [[ -n "$SELF_PATH" && -e "$SELF_PATH" ]]; then
 else
   rm -f -- "$0" || true
 fi
+
+
