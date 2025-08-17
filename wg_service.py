@@ -192,13 +192,13 @@ def _remove_client(uuid_: str, short_id: str):
     _restart_xray()
 
 
-def _build_link(uuid_: str, short_id: str, label: str) -> str:
+def _build_link(uuid_: str, short_id: str, label: str, sni: str | None = None) -> str:
     params = {
         "type": "tcp",
         "security": "reality",
         "fp": FINGERPRINT,
         "pbk": SERVER_PUBLIC_KEY,
-        "sni": SNI,
+        "sni": sni or SNI,
         "sid": short_id,
         "flow": "xtls-rprx-vision",
     }
@@ -278,7 +278,7 @@ def list_profiles(token: str = Query(...)):
     response_class=Response,
     responses={200: {"content": {"text/plain": {}}}},
 )
-def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
+def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...), sni: str | None = Query(None)):
     _require_token(token)
     with db.cursor(dictionary=True) as cur:
         cur.execute(
@@ -288,7 +288,7 @@ def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
-    link = _build_link(row["uuid"], row["short_id"], f"profile-{profile_id}")
+    link = _build_link(row["uuid"], row["short_id"], f"profile-{profile_id}", sni=sni)
     return Response(content=link, media_type="text/plain")
 
 
@@ -360,7 +360,7 @@ def list_temp_profiles(token: str = Query(...)):
     response_class=Response,
     responses={200: {"content": {"text/plain": {}}}},
 )
-def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...)):
+def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...), sni: str | None = Query(None)):
     _require_token(token)
     if not temp_db.is_connected():
         temp_db.reconnect()
@@ -384,7 +384,7 @@ def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...)):
             temp_db.commit()
         raise HTTPException(status_code=404, detail="Temp profile expired")
 
-    link = _build_link(row["uuid"], row["short_id"], f"temp-{temp_id}")
+    link = _build_link(row["uuid"], row["short_id"], f"temp-{temp_id}", sni=sni)
     return Response(content=link, media_type="text/plain")
 
 
