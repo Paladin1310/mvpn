@@ -52,7 +52,7 @@ VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "")
 DNS_SERVERS: str = os.getenv("DNS_SERVERS", "")
 XRAY_CONFIG: Path = Path(os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json"))
 
-SNI = "vk.com"
+SNI: str = os.getenv("SNI", os.getenv("SERVER_DOMAIN", "example.com"))
 FINGERPRINT = "chrome"
 API_PORT: int = int(os.getenv("API_PORT", "8080"))
 
@@ -192,13 +192,13 @@ def _remove_client(uuid_: str, short_id: str):
     _restart_xray()
 
 
-def _build_link(uuid_: str, short_id: str, label: str, sni: str | None = None) -> str:
+def _build_link(uuid_: str, short_id: str, label: str) -> str:
     params = {
         "type": "tcp",
         "security": "reality",
         "fp": FINGERPRINT,
         "pbk": SERVER_PUBLIC_KEY,
-        "sni": sni or SNI,
+        "sni": SNI,
         "sid": short_id,
         "flow": "xtls-rprx-vision",
     }
@@ -278,7 +278,7 @@ def list_profiles(token: str = Query(...)):
     response_class=Response,
     responses={200: {"content": {"text/plain": {}}}},
 )
-def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...), sni: str | None = Query(None)):
+def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     _require_token(token)
     with db.cursor(dictionary=True) as cur:
         cur.execute(
@@ -288,7 +288,7 @@ def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...), sni:
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
-    link = _build_link(row["uuid"], row["short_id"], f"profile-{profile_id}", sni=sni)
+    link = _build_link(row["uuid"], row["short_id"], f"profile-{profile_id}")
     return Response(content=link, media_type="text/plain")
 
 
@@ -360,7 +360,7 @@ def list_temp_profiles(token: str = Query(...)):
     response_class=Response,
     responses={200: {"content": {"text/plain": {}}}},
 )
-def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...), sni: str | None = Query(None)):
+def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...)):
     _require_token(token)
     if not temp_db.is_connected():
         temp_db.reconnect()
@@ -384,7 +384,7 @@ def get_temp_config(temp_id: int = FPath(..., ge=1), token: str = Query(...), sn
             temp_db.commit()
         raise HTTPException(status_code=404, detail="Temp profile expired")
 
-    link = _build_link(row["uuid"], row["short_id"], f"temp-{temp_id}", sni=sni)
+    link = _build_link(row["uuid"], row["short_id"], f"temp-{temp_id}")
     return Response(content=link, media_type="text/plain")
 
 
