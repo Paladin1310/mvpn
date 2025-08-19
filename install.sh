@@ -105,14 +105,15 @@ systemctl restart xray
 # ------------------------------------------------------------------
 echo "==> Настраиваю MariaDB…"
 systemctl enable --now mariadb
-mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
+MYSQL_CLI=$(command -v mariadb || command -v mysql)
+"$MYSQL_CLI" --protocol=SOCKET -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+"$MYSQL_CLI" --protocol=SOCKET -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
 # На случай повторной установки — принудительно обновляем пароль
-mysql -e "ALTER USER '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
-mysql -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
+"$MYSQL_CLI" --protocol=SOCKET -e "ALTER USER '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
+"$MYSQL_CLI" --protocol=SOCKET -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
 # Temp DB (отдельная база для временных профилей)
-mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_TEMP_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -e "GRANT ALL PRIVILEGES ON \`$MYSQL_TEMP_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
+"$MYSQL_CLI" --protocol=SOCKET -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_TEMP_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+"$MYSQL_CLI" --protocol=SOCKET -e "GRANT ALL PRIVILEGES ON \`$MYSQL_TEMP_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
 
 # ------------------------------------------------------------------
 # 5. Python-виртуальное окружение
@@ -188,7 +189,39 @@ systemctl daemon-reload
 systemctl enable --now wg-service.service
 
 # ------------------------------------------------------------------
-# 8. Фаервол (UFW) — опционально
+# 8. Плановый перезапуск Xray ежедневно в 03:00 (МСК) = 00:00 UTC
+# ------------------------------------------------------------------
+echo "==> Настраиваю ночной рестарт Xray (03:00 МСК)…"
+RESTART_SERVICE=/etc/systemd/system/xray-nightly-restart.service
+cat >"$RESTART_SERVICE" <<'UNIT'
+[Unit]
+Description=Nightly restart of Xray
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart xray
+UNIT
+
+RESTART_TIMER=/etc/systemd/system/xray-nightly-restart.timer
+cat >"$RESTART_TIMER" <<'UNIT'
+[Unit]
+Description=Restart Xray daily at 03:00 Moscow time (00:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+chmod 644 "$RESTART_SERVICE" "$RESTART_TIMER"
+systemctl daemon-reload
+systemctl enable --now xray-nightly-restart.timer
+
+# ------------------------------------------------------------------
+# 9. Фаервол (UFW) — опционально
 # ------------------------------------------------------------------
 if command -v ufw >/dev/null; then
   ufw allow $XRAY_PORT/tcp || true
@@ -196,7 +229,7 @@ if command -v ufw >/dev/null; then
 fi
 
 # ------------------------------------------------------------------
-# 9. Итог
+# 10. Итог
 # ------------------------------------------------------------------
 cat <<INFO
 ------------------------------------------------------------
