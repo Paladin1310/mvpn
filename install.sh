@@ -26,6 +26,12 @@ if [[ -z "$SERVER_ADDRESS" ]]; then
   }
 fi
 
+# SNI (домен для Reality TLS)
+read -rp "Введите SNI (домен для Reality): " SNI
+while [[ -z "${SNI}" ]]; do
+  read -rp "SNI не может быть пустым. Введите SNI: " SNI
+done
+
 API_TOKEN=$(openssl rand -hex 32)
 MYSQL_PASSWORD=$(openssl rand -hex 16)
 MYSQL_USER="xray_user"
@@ -74,8 +80,8 @@ cat >"$XRAY_CONFIG" <<'CONFIG'
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "dest": "vk.com:443",
-          "serverNames": ["vk.com"],
+          "dest": "SNI_DEST_REPLACE",
+          "serverNames": ["SNI_NAME_REPLACE"],
           "privateKey": "XRAY_PRIVKEY_REPLACE",
           "shortIds": []
         }
@@ -88,6 +94,8 @@ CONFIG
 
 sed -i "s/XRAY_PORT_REPLACE/$XRAY_PORT/" "$XRAY_CONFIG"
 sed -i "s/XRAY_PRIVKEY_REPLACE/$XRAY_PRIV_KEY/" "$XRAY_CONFIG"
+sed -i "s/SNI_DEST_REPLACE/${SNI}:443/" "$XRAY_CONFIG"
+sed -i "s/SNI_NAME_REPLACE/$SNI/" "$XRAY_CONFIG"
 
 systemctl enable --now xray
 systemctl restart xray
@@ -99,6 +107,8 @@ echo "==> Настраиваю MariaDB…"
 systemctl enable --now mariadb
 mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
+# На случай повторной установки — принудительно обновляем пароль
+mysql -e "ALTER USER '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD';"
 mysql -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DB\`.* TO '$MYSQL_USER'@'localhost'; FLUSH PRIVILEGES;"
 # Temp DB (отдельная база для временных профилей)
 mysql -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_TEMP_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
@@ -124,6 +134,7 @@ SERVER_DOMAIN=SERVER_ADDRESS_REPLACE
 SERVER_PORT=XRAY_PORT_REPLACE
 SERVER_PUBLIC_KEY=XRAY_PUBKEY_REPLACE
 XRAY_CONFIG=XRAY_CONFIG_REPLACE
+SNI=SNI_REPLACE
 
 MYSQL_HOST=127.0.0.1
 MYSQL_DB=MYSQL_DB_REPLACE
@@ -142,6 +153,7 @@ sed -i "s/SERVER_ADDRESS_REPLACE/$SERVER_ADDRESS/" /etc/wg-service.env
 sed -i "s/XRAY_PORT_REPLACE/$XRAY_PORT/" /etc/wg-service.env
 sed -i "s/XRAY_PUBKEY_REPLACE/$XRAY_PUB_KEY/" /etc/wg-service.env
 sed -i "s|XRAY_CONFIG_REPLACE|$XRAY_CONFIG|" /etc/wg-service.env
+sed -i "s/SNI_REPLACE/$SNI/" /etc/wg-service.env
 sed -i "s/MYSQL_DB_REPLACE/$MYSQL_DB/" /etc/wg-service.env
 sed -i "s/MYSQL_USER_REPLACE/$MYSQL_USER/" /etc/wg-service.env
 sed -i "s/MYSQL_PASSWORD_REPLACE/$MYSQL_PASSWORD/" /etc/wg-service.env
@@ -180,6 +192,7 @@ systemctl enable --now wg-service.service
 # ------------------------------------------------------------------
 if command -v ufw >/dev/null; then
   ufw allow $XRAY_PORT/tcp || true
+  ufw allow $API_PORT/tcp || true
 fi
 
 # ------------------------------------------------------------------

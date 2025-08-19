@@ -52,7 +52,7 @@ VPN_NETWORK_STR: str = os.getenv("VPN_NETWORK", "")
 DNS_SERVERS: str = os.getenv("DNS_SERVERS", "")
 XRAY_CONFIG: Path = Path(os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json"))
 
-SNI = "vk.com"
+SNI: str = os.getenv("SNI", os.getenv("SERVER_DOMAIN", "example.com"))
 FINGERPRINT = "chrome"
 API_PORT: int = int(os.getenv("API_PORT", "8080"))
 
