@@ -74,6 +74,10 @@ with db.cursor() as cur:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """
     )
+    # Ensure "disabled" column exists for enable/disable feature
+    cur.execute(
+        "ALTER TABLE vless_profiles ADD COLUMN IF NOT EXISTS disabled TINYINT(1) NOT NULL DEFAULT 0"
+    )
 
 # Temporary DB (separate database)
 
@@ -189,7 +193,6 @@ def _remove_client(uuid_: str, short_id: str):
     reality = inbound.get("streamSettings", {}).get("realitySettings", {})
     reality["shortIds"] = [s for s in reality.get("shortIds", []) if s != short_id]
     _save_config(cfg)
-    _restart_xray()
 
 
 def _build_link(uuid_: str, short_id: str, label: str) -> str:
@@ -233,6 +236,7 @@ class ProfileOut(BaseModel):
     uuid: str
     short_id: str
     created_at: datetime.datetime
+    disabled: bool
 
 
 class TempProfileOut(BaseModel):
@@ -262,14 +266,14 @@ def create_profile(token: str = Query(...)):
         profile_id = cur.lastrowid
     db.commit()
 
-    return ProfileOut(id=profile_id, uuid=uuid_, short_id=short_id, created_at=now)
+    return ProfileOut(id=profile_id, uuid=uuid_, short_id=short_id, created_at=now, disabled=False)
 
 
 @app.get("/profiles", response_model=List[ProfileOut])
 def list_profiles(token: str = Query(...)):
     _require_token(token)
     with db.cursor(dictionary=True) as cur:
-        cur.execute("SELECT id, uuid, short_id, created_at FROM vless_profiles")
+        cur.execute("SELECT id, uuid, short_id, created_at, disabled FROM vless_profiles")
         return cur.fetchall()
 
 
@@ -282,12 +286,14 @@ def get_config(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     _require_token(token)
     with db.cursor(dictionary=True) as cur:
         cur.execute(
-            "SELECT uuid, short_id FROM vless_profiles WHERE id=%s",
+            "SELECT uuid, short_id, disabled FROM vless_profiles WHERE id=%s",
             (profile_id,),
         )
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
+    if int(row.get("disabled", 0)) == 1:
+        raise HTTPException(status_code=403, detail="Profile is disabled")
     link = _build_link(row["uuid"], row["short_id"], f"profile-{profile_id}")
     return Response(content=link, media_type="text/plain")
 
@@ -311,6 +317,59 @@ def delete_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
     db.commit()
 
     return {"status": "deleted", "profile_id": profile_id}
+
+# ---------------------------------------------------------------------------
+# Enable/Disable profile
+# ---------------------------------------------------------------------------
+
+@app.post("/profiles/{profile_id}/disable")
+def disable_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
+    _require_token(token)
+    with db.cursor(dictionary=True) as cur:
+        cur.execute(
+            "SELECT uuid, short_id, disabled FROM vless_profiles WHERE id=%s",
+            (profile_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Update DB flag first
+    with db.cursor() as cur:
+        cur.execute("UPDATE vless_profiles SET disabled=1 WHERE id=%s", (profile_id,))
+    db.commit()
+
+    # Remove from runtime config file without restart (will take effect on nightly restart)
+    try:
+        _remove_client(row["uuid"], row["short_id"])  # no restart inside
+    except HTTPException:
+        # Ignore runtime removal errors; DB flag is authoritative
+        pass
+
+    return {"status": "disabled", "profile_id": profile_id}
+
+
+@app.post("/profiles/{profile_id}/enable")
+def enable_profile(profile_id: int = FPath(..., ge=1), token: str = Query(...)):
+    _require_token(token)
+    with db.cursor(dictionary=True) as cur:
+        cur.execute(
+            "SELECT uuid, short_id, disabled FROM vless_profiles WHERE id=%s",
+            (profile_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Update DB flag
+    with db.cursor() as cur:
+        cur.execute("UPDATE vless_profiles SET disabled=0 WHERE id=%s", (profile_id,))
+    db.commit()
+
+    # Add back to config and restart Xray (as per add semantics)
+    _add_client(row["uuid"], row["short_id"])  # this triggers restart
+
+    return {"status": "enabled", "profile_id": profile_id}
 
 # -------------------- Temporary profiles (separate DB) ----------------------
 
